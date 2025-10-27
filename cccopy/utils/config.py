@@ -13,6 +13,7 @@ from ..core import GitHelper, CCCopyError, LockManager
 from .ui_handler import display_message, messagebox
 from .permissions import AtomicProductionPermission
 from .file_utils import handle_conflict, update_work_git_after_merge, show_git_history
+from .helpers import expand_path
 from ..models import FileState
 
 
@@ -966,9 +967,9 @@ class ProjectManager:
                     self.config.set(section_name, key, value)
                     display_message(f"개인 설정 적용: [{section_name}] {key} = {value}")
 
-        # 작업 디렉토리 설정
-        self.production_dir = self.config.get('CONFIG', 'PRODUCTION_DIR')
-        self.working_dir = self.config.get('CONFIG', 'WORKING_BASE_DIR')
+        # 작업 디렉토리 설정 (~ 와 환경변수 확장 지원)
+        self.production_dir = expand_path(self.config.get('CONFIG', 'PRODUCTION_DIR'))
+        self.working_dir = expand_path(self.config.get('CONFIG', 'WORKING_BASE_DIR'))
 
         # ProductionTagManager에 project_personal_dir 전달 (production.tag는 ~/.cccopy/{project_number}/에 저장)
         self.tag_manager = ProductionTagManager(self.project_personal_dir, project_manager=self)
@@ -1085,11 +1086,16 @@ class ProjectManager:
         if project_name not in self.project_configs:
             return None
         config_file, config = self.project_configs[project_name]
+
+        # 경로 확장 (~ 와 환경변수 지원)
+        prod_dir = config.get('CONFIG', 'PRODUCTION_DIR', fallback='N/A')
+        work_dir = config.get('CONFIG', 'WORKING_BASE_DIR', fallback='N/A')
+
         return {
             'name': project_name,
             'config_file': config_file,
-            'production_dir': config.get('CONFIG', 'PRODUCTION_DIR', fallback='N/A'),
-            'working_base_dir': config.get('CONFIG', 'WORKING_BASE_DIR', fallback='N/A')
+            'production_dir': expand_path(prod_dir) if prod_dir != 'N/A' else prod_dir,
+            'working_base_dir': expand_path(work_dir) if work_dir != 'N/A' else work_dir
         }
 
     def _migrate_old_projects(self):

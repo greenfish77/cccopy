@@ -5,6 +5,35 @@ import os
 import configparser
 
 
+def expand_path(path: str) -> str:
+    """경로의 ~ 와 환경변수를 확장
+
+    Args:
+        path: 확장할 경로 (예: ~/work/abc, ${MY_WORK}/abc)
+
+    Returns:
+        str: 확장된 절대 경로
+
+    Examples:
+        >>> expand_path("~/work")
+        "/home/username/work"
+        >>> expand_path("${HOME}/work")
+        "/home/username/work"
+        >>> expand_path("$HOME/work")
+        "/home/username/work"
+    """
+    if not path:
+        return path
+
+    # ~ 확장 (홈 디렉토리)
+    path = os.path.expanduser(path)
+
+    # 환경변수 확장 (${VAR} 또는 $VAR)
+    path = os.path.expandvars(path)
+
+    return path
+
+
 def safe_input(prompt="", default=""):
     """EOF 안전한 input 함수"""
     from .ui_handler import display_message

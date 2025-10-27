@@ -195,8 +195,8 @@ python3 main.py
 ```ini
 [CONFIG]
 PROJECT_NAME=example_project
-PRODUCTION_DIR=/path/to/production
-WORKING_BASE_DIR=/path/to/work
+PRODUCTION_DIR=/path/to/production        # 절대 경로
+WORKING_BASE_DIR=/path/to/work            # 절대 경로
 CONFIG_VERSION=1
 
 [SOURCES]
@@ -213,6 +213,26 @@ GROUP=work             # 업로드시 사용할 그룹 권한
 
 [LOG]
 PATH=/tmp/log/
+```
+
+**경로 확장 지원:**
+- **`~` (홈 디렉토리)**: `~/work/abc` → `/home/username/work/abc`
+- **환경변수**: `${MY_WORK}/abc` 또는 `$MY_WORK/abc` → `/data/myproject/abc`
+- **절대경로**: `/absolute/path` → `/absolute/path` (그대로 유지)
+
+**예시:**
+```ini
+# 홈 디렉토리 사용
+PRODUCTION_DIR=~/projects/production
+WORKING_BASE_DIR=~/work/project1
+
+# 환경변수 사용
+PRODUCTION_DIR=${PROJECT_ROOT}/production
+WORKING_BASE_DIR=${WORK_BASE}/myproject
+
+# 혼합 사용
+PRODUCTION_DIR=~/projects/${PROJECT_NAME}/prod
+WORKING_BASE_DIR=${HOME}/work/${PROJECT_NAME}
 ```
 
 ### 전역 환경설정 (~/.cccopy/preference/cccopy.ini)
