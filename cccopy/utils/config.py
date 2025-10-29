@@ -326,14 +326,41 @@ class ProjectSelectionManager:
                 print(f"  {prefix}{i}  {display_name} ({work_dir}){current_marker}")
 
             print()
-            print("  [Enter] 선택, [D] 삭제, [C] 복제, [ESC/0] 뒤로가기")
+            print("  [Enter] 선택, [E] 편집, [D] 삭제, [C] 복제, [ESC/0] 뒤로가기")
             print("-" * 70)
 
             try:
-                choice = input(f"\n선택하세요 (1-{len(registered_projects)}, D+번호, C+번호, 0): ").strip().upper()
+                choice = input(f"\n선택하세요 (1-{len(registered_projects)}, E+번호, D+번호, C+번호, 0): ").strip().upper()
 
                 if choice == '0' or choice == 'ESC' or choice == '':
                     return False
+
+                # 편집 명령 처리 (E1, E2 등)
+                if choice.startswith('E') and len(choice) > 1:
+                    try:
+                        idx = int(choice[1:]) - 1
+                        if 0 <= idx < len(registered_projects):
+                            project_count, project_name, work_dir, tag, _ = registered_projects[idx]
+                            padded_project_count = f"{project_count:04d}"
+
+                            # 프로젝트 편집
+                            if self.edit_project(padded_project_count, project_name, tag):
+                                # 편집된 프로젝트가 현재 프로젝트인 경우 다시 로드
+                                if str(project_count) == self.workspace.current_project_number:
+                                    display_message("현재 프로젝트 설정이 변경되었습니다. 프로젝트를 다시 로드합니다...", "INFO")
+                                    self.workspace._apply_final_config()
+                                    display_message("프로젝트 로드 완료", "INFO")
+
+                                # 목록 갱신
+                                registered_projects = self._get_registered_projects()
+
+                            continue
+                        else:
+                            print("잘못된 번호입니다.")
+                            continue
+                    except ValueError:
+                        print("올바른 형식으로 입력하세요. (예: E1, E2)")
+                        continue
 
                 # 복제 명령 처리 (C1, C2 등)
                 if choice.startswith('C') and len(choice) > 1:
@@ -542,6 +569,58 @@ class ProjectSelectionManager:
 
         except Exception as e:
             display_message(f"프로젝트 삭제 중 오류: {e}", "ERROR")
+            return False
+
+    def edit_project(self, project_number, project_name, tag):
+        """프로젝트 설정 편집
+
+        Args:
+            project_number: 편집할 프로젝트 번호 (4자리 문자열)
+            project_name: 프로젝트 이름
+            tag: 프로젝트 TAG
+
+        Returns:
+            bool: 편집 성공 여부 (파일이 변경되었는지 여부)
+        """
+        from .helpers import launch_text_editor
+
+        try:
+            # 프로젝트 설정 파일 경로
+            project_dir = os.path.join(self.personal_config_dir, project_number)
+            config_file = os.path.join(project_dir, "config.ini")
+
+            if not os.path.exists(config_file):
+                display_message(f"프로젝트 설정 파일을 찾을 수 없습니다: {config_file}", "ERROR")
+                return False
+
+            # 프로젝트 정보 로깅
+            display_name = f"{project_name}({tag})" if tag else project_name
+            display_message(f"프로젝트 편집 시작: {display_name}", "INFO")
+            display_message(f"설정 파일: {config_file}", "DEBUG")
+
+            # 파일 수정 시간 기록
+            mtime_before = os.path.getmtime(config_file)
+
+            # 텍스트 에디터 실행
+            success = launch_text_editor(config_file)
+
+            if success:
+                # 파일 수정 시간 확인
+                mtime_after = os.path.getmtime(config_file)
+
+                # 파일이 변경되었는지 확인
+                if mtime_after > mtime_before:
+                    display_message(f"프로젝트 설정이 변경되었습니다: {display_name}", "INFO")
+                    return True
+                else:
+                    display_message(f"프로젝트 설정이 변경되지 않았습니다: {display_name}", "INFO")
+                    return False
+            else:
+                display_message("에디터 실행에 실패했습니다", "ERROR")
+                return False
+
+        except Exception as e:
+            display_message(f"프로젝트 편집 중 오류: {e}", "ERROR")
             return False
 
     def clone_project(self, source_project_number, new_working_dir, new_tag):
@@ -757,16 +836,23 @@ class ProjectSelectionManager:
                 f.write("; ===================================================================\n")
                 f.write("\n")
 
-                # 기존 SOURCES 섹션 복사
-                f.write("[SOURCES]\n")
+                # 기존 SOURCES 섹션을 주석으로 표시 (참고용)
+                f.write("; 템플릿의 [SOURCES] 패턴 (참고용 - 필요시 아래 주석을 해제하고 수정):\n")
+                f.write("; [SOURCES]\n")
                 if config.has_section('SOURCES'):
                     for key, value in config.items('SOURCES'):
-                        f.write(f"{key}={value}\n")
+                        f.write(f"; {key}={value}\n")
                 else:
-                    f.write("; 예시:\n")
                     f.write("; 00=src/**\n")
                     f.write("; 01=docs/**\n")
                     f.write("; 02=config/*.ini\n")
+                f.write(";\n")
+                f.write("; [SOURCES] 섹션을 추가하려면:\n")
+                f.write(";   1. 위의 '; [SOURCES]' 줄에서 ';'를 제거\n")
+                f.write(";   2. 필요한 패턴 줄에서 ';'를 제거\n")
+                f.write(";   3. 패턴을 원하는 대로 수정\n")
+                f.write(";\n")
+                f.write("; [SOURCES]를 추가하지 않으면 템플릿의 기본 패턴이 사용됩니다.\n")
 
             display_message(f"임시 편집 파일 생성: {temp_path}", "INFO")
             return temp_path
@@ -892,6 +978,25 @@ class ProjectManager:
         # last_project가 없거나 찾을 수 없는 경우 첫 번째 프로젝트 자동 선택 시도
         self._try_auto_select_first_project()
 
+    def _find_project_number_by_name(self, project_name):
+        """프로젝트 이름으로 프로젝트 번호 찾기"""
+        try:
+            # 모든 숫자 디렉토리 스캔
+            for entry in os.listdir(self.personal_config_dir):
+                if entry.isdigit() or (len(entry) == 4 and entry.isdigit()):
+                    project_dir = os.path.join(self.personal_config_dir, entry)
+                    if os.path.isdir(project_dir):
+                        config_file = os.path.join(project_dir, "config.ini")
+                        if os.path.exists(config_file):
+                            config = configparser.ConfigParser()
+                            config.read(config_file)
+                            if config.has_section('INFO') and config.has_option('INFO', 'PROJECT_NAME'):
+                                if config.get('INFO', 'PROJECT_NAME') == project_name:
+                                    return entry
+        except Exception as e:
+            display_message(f"프로젝트 번호 찾기 실패: {e}", "WARN")
+        return None
+
     def _try_auto_select_first_project(self):
         """첫 번째 등록된 프로젝트를 자동으로 선택"""
         try:
@@ -928,6 +1033,10 @@ class ProjectManager:
             raise CCCopyError(f"프로젝트를 찾을 수 없습니다: {project_name}")
 
         self.selected_project = project_name
+
+        # 프로젝트 이름으로 current_project_number 찾기
+        self.current_project_number = self._find_project_number_by_name(project_name)
+
         display_message(f"프로젝트 선택: {project_name}")
 
     def _apply_final_config(self):
@@ -960,9 +1069,21 @@ class ProjectManager:
             personal_config = configparser.ConfigParser()
             personal_config.read(personal_project_config)
 
+            # 섹션별 오버라이드 정책
+            REPLACE_SECTIONS = ['SOURCES', 'EXCLUDES']  # 전체 교체할 섹션
+
             for section_name in personal_config.sections():
-                if not self.config.has_section(section_name):
+                # SOURCES, EXCLUDES는 전체 교체 (키 병합 방지)
+                if section_name in REPLACE_SECTIONS:
+                    # 기존 섹션 삭제 후 재생성
+                    if self.config.has_section(section_name):
+                        self.config.remove_section(section_name)
                     self.config.add_section(section_name)
+                    display_message(f"개인 설정으로 [{section_name}] 섹션 전체 교체")
+                elif not self.config.has_section(section_name):
+                    self.config.add_section(section_name)
+
+                # 개인 설정 값 적용
                 for key, value in personal_config.items(section_name):
                     self.config.set(section_name, key, value)
                     display_message(f"개인 설정 적용: [{section_name}] {key} = {value}")
@@ -1036,14 +1157,21 @@ class ProjectManager:
             default_working_dir = base_config.get('CONFIG', 'WORKING_BASE_DIR')
             project_config.set('CONFIG', 'WORKING_BASE_DIR', default_working_dir)
 
-        # 커스텀 ini 파일이 있으면 내용을 읽어서 반영 (주석 제외)
+        # 커스텀 ini 파일이 있으면 내용을 읽어서 반영
+        # SOURCES, EXCLUDES는 제외 (주석으로만 표시)
         if custom_ini_file and os.path.exists(custom_ini_file):
             try:
                 custom_config = configparser.ConfigParser()
                 custom_config.read(custom_ini_file, encoding='utf-8')
 
-                # 커스텀 설정의 모든 섹션을 반영
+                # SOURCES, EXCLUDES를 제외한 섹션만 반영
+                SKIP_SECTIONS = ['SOURCES', 'EXCLUDES']
+
                 for section in custom_config.sections():
+                    if section in SKIP_SECTIONS:
+                        display_message(f"[{section}] 섹션은 템플릿 주석으로만 제공됩니다 (직접 편집 필요)", "INFO")
+                        continue
+
                     if not project_config.has_section(section):
                         project_config.add_section(section)
 
@@ -1063,7 +1191,48 @@ class ProjectManager:
         from datetime import datetime
         project_config.set('INFO', 'CREATE_DATE', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
+        # config.ini 파일 작성 (SOURCES 템플릿 주석 포함)
         with open(project_personal_config, 'w') as f:
+            # 템플릿의 SOURCES 섹션을 주석으로 추가
+            _, base_config = self.project_configs[project_name]
+
+            # 주석 헤더 작성
+            f.write("# CCCopy 프로젝트 개인 설정 파일\n")
+            f.write("# 이 파일은 템플릿 설정을 오버라이드합니다.\n")
+            f.write("#\n")
+            f.write("# [SOURCES] 섹션 사용법:\n")
+            f.write("#   - 추적할 파일/디렉토리 패턴을 지정합니다\n")
+            f.write("#   - glob 패턴 사용 가능 (예: AAA/**, *.cpp, **/test/*.h)\n")
+            f.write("#   - 여러 패턴을 00, 01, 02... 형식으로 추가\n")
+            f.write("#   - 이 파일에 [SOURCES]를 추가하면 템플릿의 SOURCES를 완전히 대체합니다\n")
+            f.write("#\n")
+            f.write("# [EXCLUDES] 섹션 사용법:\n")
+            f.write("#   - 제외할 파일/디렉토리 패턴을 지정합니다\n")
+            f.write("#   - 예: **/.git/ (모든 .git 디렉토리)\n")
+            f.write("#   - 예: **/__pycache__/ (모든 Python 캐시)\n")
+            f.write("#   - 예: **/backup/ (모든 backup 디렉토리)\n")
+            f.write("#   - 예: **/*.log (모든 .log 파일)\n")
+            f.write("#\n")
+
+            # 템플릿의 SOURCES 섹션을 주석으로 추가
+            if base_config.has_section('SOURCES'):
+                f.write("# 템플릿의 [SOURCES] 패턴 (참고용):\n")
+                f.write("# [SOURCES]\n")
+                for key in sorted(base_config['SOURCES'].keys()):
+                    value = base_config.get('SOURCES', key)
+                    f.write(f"# {key}={value}\n")
+                f.write("#\n")
+
+            # 템플릿의 EXCLUDES 섹션도 주석으로 추가
+            if base_config.has_section('EXCLUDES'):
+                f.write("# 템플릿의 [EXCLUDES] 패턴 (참고용):\n")
+                f.write("# [EXCLUDES]\n")
+                for key in sorted(base_config['EXCLUDES'].keys()):
+                    value = base_config.get('EXCLUDES', key)
+                    f.write(f"# {key}={value}\n")
+                f.write("#\n\n")
+
+            # 실제 설정 작성
             project_config.write(f)
 
         # 최종 설정 적용
@@ -2213,9 +2382,79 @@ class ProjectManager:
         # Git 상태 표시
         try:
             display_message("현재 Git 상태:", "INFO")
-            GitHelper.run_git_command(['status', '--short'], cwd=self.working_dir)
+            status_output = GitHelper.run_git_command(['status', '--short'], cwd=self.working_dir, capture_output=True)
+            if status_output:
+                for line in status_output.strip().split('\n'):
+                    if line.strip():
+                        display_message(f"  {line}", "INFO")
         except Exception as e:
             display_message(f"Git 상태 확인 실패: {e}", "ERROR")
+
+        # SOURCES 패턴에 매칭되는 변경 파일만 필터링
+        display_message("SOURCES 패턴에 매칭되는 파일 확인 중...", "INFO")
+        try:
+            status_output = GitHelper.run_git_command(['status', '--short'], cwd=self.working_dir, capture_output=True)
+
+            changed_files_in_sources = []
+            changed_files_outside_sources = []
+            source_patterns = self.get_source_patterns()
+            import fnmatch
+
+            for line in status_output.strip().split('\n'):
+                if line.strip():
+                    # git status --short 형식: "XY filename" (XY는 2글자 상태 코드)
+                    rel_path = line[2:].strip()
+
+                    # SOURCES 패턴 매칭 확인
+                    match = False
+                    for pattern in source_patterns:
+                        # glob 패턴 매칭
+                        if fnmatch.fnmatch(rel_path, pattern):
+                            match = True
+                            break
+                        # 디렉토리 패턴 (AAA/**)
+                        elif pattern.endswith('**'):
+                            dir_prefix = pattern.rstrip('*').rstrip('/')
+                            if rel_path.startswith(dir_prefix + '/') or rel_path == dir_prefix:
+                                match = True
+                                break
+                        # **/ 패턴 처리
+                        elif pattern.startswith('**/'):
+                            tail = pattern[3:]
+                            if fnmatch.fnmatch(rel_path, '*/' + tail) or fnmatch.fnmatch(rel_path, tail):
+                                match = True
+                                break
+
+                    if match:
+                        changed_files_in_sources.append(rel_path)
+                    else:
+                        changed_files_outside_sources.append(rel_path)
+
+            # SOURCES 외부 파일이 있으면 경고
+            if changed_files_outside_sources:
+                display_message("=" * 60, "WARNING")
+                display_message("[경고] SOURCES 패턴 외부에 변경된 파일이 있습니다:", "WARNING")
+                for file_path in changed_files_outside_sources[:5]:
+                    display_message(f"  - {file_path}", "WARNING")
+                if len(changed_files_outside_sources) > 5:
+                    display_message(f"  ... 외 {len(changed_files_outside_sources)-5}개 더", "WARNING")
+                display_message("이 파일들은 SAVE에서 제외됩니다.", "WARNING")
+                display_message("=" * 60, "WARNING")
+
+            # SOURCES 내부 파일이 없으면 종료
+            if not changed_files_in_sources:
+                display_message("커밋할 변경사항이 없습니다 (SOURCES 패턴 내에서).", "INFO")
+                return
+
+            display_message(f"SOURCES 패턴에 매칭되는 변경 파일: {len(changed_files_in_sources)}개", "INFO")
+            for file_path in changed_files_in_sources[:5]:
+                display_message(f"  - {file_path}", "INFO")
+            if len(changed_files_in_sources) > 5:
+                display_message(f"  ... 외 {len(changed_files_in_sources)-5}개 더", "INFO")
+
+        except Exception as e:
+            display_message(f"파일 필터링 실패: {e}", "ERROR")
+            return
 
         # 커밋 메시지 입력
         commit_message = messagebox("커밋 메시지를 입력하세요:", "커밋 메시지", "info", "input", "Work changes")
@@ -2225,12 +2464,14 @@ class ProjectManager:
         if not commit_message.strip():
             commit_message = "Work changes"
 
-        # Work 저장소에 커밋 (권한 상승 없음)
+        # Work 저장소에 커밋 (SOURCES 패턴 파일만)
         try:
             display_message("변경사항을 Work Git에 커밋 중...", "INFO")
-            GitHelper.add_all(self.working_dir)
+            # SOURCES 패턴에 매칭되는 파일만 add
+            GitHelper.add_files(self.working_dir, changed_files_in_sources)
             GitHelper.commit_all(self.working_dir, commit_message)
             display_message(f"커밋 완료: {commit_message}", "INFO")
+            display_message(f"  커밋된 파일: {len(changed_files_in_sources)}개", "INFO")
             display_message("SAVE가 성공적으로 완료되었습니다.", "INFO")
         except Exception as e:
             display_message(f"커밋 실패: {e}", "ERROR")

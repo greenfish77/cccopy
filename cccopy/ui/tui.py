@@ -1763,22 +1763,91 @@ class CCCopyTUI:
 
             files = filtered_files
 
-            # 3. Git tracked files로 필터링 (background에서 로딩 가능)
+            # 3. SOURCES 패턴으로 파일 필터링 (Git tracked와 무관하게 적용)
+            sources_filtered_files = []
+            for file_name in files:
+                # 현재 경로 기준 상대 경로
+                if current_path:
+                    rel_path = os.path.join(current_path, file_name)
+                else:
+                    rel_path = file_name
+
+                # SOURCES 패턴 체크
+                match = False
+                for pattern in source_patterns:
+                    if fnmatch.fnmatch(rel_path, pattern):
+                        match = True
+                        break
+                    # **/ 패턴 처리
+                    if '**' in pattern:
+                        # AAA/** -> AAA로 시작하는 모든 파일
+                        if pattern.endswith('/**'):
+                            prefix = pattern[:-3]
+                            if rel_path.startswith(prefix + '/') or rel_path == prefix:
+                                match = True
+                                break
+                        # **/file -> 모든 하위의 file
+                        elif pattern.startswith('**/'):
+                            tail = pattern[3:]
+                            if fnmatch.fnmatch(rel_path, '*/' + tail) or fnmatch.fnmatch(rel_path, tail):
+                                match = True
+                                break
+
+                if match:
+                    sources_filtered_files.append(file_name)
+
+            files = sources_filtered_files
+
+            # 4. SOURCES 패턴으로 디렉토리 필터링 (하위에 매칭되는 패턴이 있는지)
+            sources_valid_dirs = set()
+            for dir_name in directories:
+                # 현재 경로 기준 상대 경로
+                if current_path:
+                    dir_path = os.path.join(current_path, dir_name)
+                else:
+                    dir_path = dir_name
+
+                # SOURCES 패턴에 이 디렉토리 하위가 포함되는지 체크
+                has_match = False
+                for pattern in source_patterns:
+                    # AAA/** 패턴이면 AAA와 그 하위 모두 매칭
+                    if pattern.endswith('/**'):
+                        prefix = pattern[:-3]
+                        if dir_path.startswith(prefix + '/') or dir_path == prefix:
+                            has_match = True
+                            break
+                    # AAA/sub/file 같은 패턴이면 AAA, AAA/sub 디렉토리 모두 표시
+                    if '/' in pattern:
+                        pattern_parts = pattern.split('/')
+                        dir_parts = dir_path.split('/')
+                        # 패턴의 일부가 현재 디렉토리 경로와 매칭되는지 체크
+                        if len(dir_parts) < len(pattern_parts):
+                            # 패턴의 앞부분이 현재 디렉토리와 일치하면 표시
+                            if pattern_parts[:len(dir_parts)] == dir_parts:
+                                has_match = True
+                                break
+
+                if has_match:
+                    sources_valid_dirs.add(dir_name)
+
+            directories = sources_valid_dirs
+
+            # 5. Git tracked files로 필터링 (background에서 로딩 가능)
             if async_mode:
                 # Background에서 git ls-files 로딩 시작 (UI는 blocking 안 됨)
                 self.get_git_tracked_files(base_dir, async_mode=True)
-                # 일단 SOURCES/EXCLUDES 패턴 필터링된 목록 반환 (즉시)
+                # 일단 SOURCES 패턴 필터링된 목록 반환 (즉시)
             else:
-                # 동기 모드: Git tracked files로 정확하게 필터링
+                # 동기 모드: Git tracked files로 추가 필터링
                 tracked_files = self.get_git_tracked_files(base_dir, async_mode=False)
                 if tracked_files:
                     tracked_set = set(tracked_files)
-                    # 파일 필터링
+                    # 파일 필터링 (SOURCES 필터링 + Git tracked)
                     files = [f for f in files if (
                         os.path.join(current_path, f) if current_path else f
                     ) in tracked_set]
-                    # 디렉토리 필터링 (하위에 tracked 파일이 있는지)
-                    valid_dirs = set()
+                    # 디렉토리 필터링 (SOURCES 필터링 + Git tracked 파일이 있는 디렉토리)
+                    git_valid_dirs = set()
                     for tf in tracked_files:
                         if current_path:
                             if not tf.startswith(current_path + "/"):
@@ -1787,8 +1856,8 @@ class CCCopyTUI:
                         else:
                             rel = tf
                         if "/" in rel:
-                            valid_dirs.add(rel.split("/")[0])
-                    directories = directories & valid_dirs
+                            git_valid_dirs.add(rel.split("/")[0])
+                    directories = directories & git_valid_dirs
 
             return directories, files
 
@@ -5516,208 +5585,259 @@ class CCCopyTUI:
             else:
                 display_name = project_name
 
-            # 삭제 또는 선택 확인
-            action = self.show_choice_dialog(
-                f"프로젝트: {display_name}\n경로: {work_dir}",
-                ["프로젝트 선택", "프로젝트 삭제", "프로젝트 복제", "취소"]
-            )
-
-            if action == 0:  # 프로젝트 선택
-                if str(project_count) == current_project:
-                    self.show_info_dialog(f"이미 현재 프로젝트입니다:\n{display_name}")
-                    continue
-
-                try:
-                    self.workspace._load_project(project_name)
-                    # 4자리 패딩된 프로젝트 번호 생성
-                    padded_project_number = f"{project_count:04d}"
-                    self.workspace.current_project_number = padded_project_number  # 현재 프로젝트 번호 저장
-                    self.workspace._apply_final_config()  # 설정 적용하여 working_dir 업데이트
-                    project_manager._update_last_project(padded_project_number)
-
-                    # 프로젝트 변경시 캐시 초기화
-                    self.tracked_files_cache = None
-                    self.tracked_files_cache_time = 0
-                    self.file_state_cache.clear()
-                    self.workspace.last_production_check_time = 0  # Production 체크 시간도 초기화
-                    self.add_log("프로젝트 변경으로 캐시 초기화됨", "DEBUG")
-
-                    self.show_info_dialog(f"프로젝트가 변경되었습니다:\n{display_name}\n\n작업 경로: {self.workspace.working_dir}")  # 실제 working_dir 표시
-                    return True
-                except Exception as e:
-                    self.show_error_dialog(f"프로젝트 변경 실패:\n{e}")
-                    continue
-
-            elif action == 1:  # 프로젝트 삭제
-                # 삭제 옵션 선택
-                delete_option = self.show_choice_dialog(
-                    f"프로젝트 삭제 확인\n\n프로젝트: {display_name}\n작업 경로: {work_dir}",
-                    ["삭제(항목만 삭제, 파일 유지)", "삭제(전체 삭제)", "취소"]
+            # 이 프로젝트에 대한 action을 반복 선택할 수 있도록 내부 루프
+            while True:
+                action = self.show_choice_dialog(
+                    f"프로젝트: {display_name}\n경로: {work_dir}",
+                    ["프로젝트 선택", "프로젝트 편집", "프로젝트 삭제", "프로젝트 복제", "취소"]
                 )
 
-                if delete_option == 0:  # 항목만 삭제 (파일 유지)
-                    self.add_log(f"프로젝트 항목 삭제 시도: {project_count} ({project_name})", "DEBUG")
-                    self.add_log(f"삭제할 경로: ~/.cccopy/project/{project_count:04d}/", "DEBUG")
+                if action == 4 or action == -1:  # 취소
+                    break  # 외부 루프로 (프로젝트 목록으로)
 
-                    # 프로젝트 번호를 4자리로 패딩하여 삭제 시도
-                    padded_project_count = f"{project_count:04d}"
-                    delete_result = project_manager._delete_project(padded_project_count)
-                    if delete_result:
-                        self.add_log(f"프로젝트 항목 삭제 성공: {project_count}", "INFO")
-                        self.show_info_dialog(f"프로젝트 '{project_name}' 항목이 삭제되었습니다.\n(작업 파일은 유지됩니다)")
-                        # 목록 갱신
-                        registered_projects = project_manager._get_registered_projects()
-                        if not registered_projects:
-                            self.show_info_dialog("더 이상 등록된 프로젝트가 없습니다.")
-                            return False
-                        # 메뉴 항목 재구성 (원래 포맷과 동일하게)
-                        menu_items = []
-                        for project_count, proj_name, proj_dir, tag, create_date in registered_projects:
-                            current_marker = " [현재]" if str(project_count) == current_project else ""
-                            if tag:
-                                display_name = f"{proj_name}({tag})"
-                            else:
-                                display_name = proj_name
-                            menu_items.append(f"{display_name} ({proj_dir}){current_marker}")
-                        # 삭제 후 처음부터 다시 시작
-                        continue
-                    else:
-                        # 삭제 실패 (예외 발생 등)
-                        actual_path = f"~/.cccopy/project/{project_count:04d}"
-                        self.add_log(f"프로젝트 삭제 실패: {project_count}", "ERROR")
-                        self.add_log(f"삭제 실패 경로: {actual_path}", "ERROR")
-                        self.show_error_dialog(f"프로젝트 삭제 중 오류가 발생했습니다.")
-
-                elif delete_option == 1:  # 전체 삭제 (파일 포함)
-                    # 전체 삭제 최종 확인
-                    final_confirm = self.show_choice_dialog(
-                        f"전체 삭제 최종 확인\n\n프로젝트: {display_name}\n작업 경로: {work_dir}\n\n경고: 작업 디렉토리의 모든 파일이 삭제됩니다!\n정말로 전체 삭제하시겠습니까?",
-                        ["Yes (전체 삭제)", "No (취소)"]
-                    )
-
-                    if final_confirm == 0:  # Yes, 전체 삭제 실행
-                        self.add_log(f"프로젝트 전체 삭제 시도: {project_count} ({project_name})", "DEBUG")
-                        self.add_log(f"삭제할 설정 경로: ~/.cccopy/project/{project_count:04d}/", "DEBUG")
-                        self.add_log(f"삭제할 작업 경로: {work_dir}", "DEBUG")
-
-                        import shutil
-                        import os
-
-                        try:
-                            # 1. 작업 디렉토리 삭제
-                            if os.path.exists(work_dir):
-                                shutil.rmtree(work_dir)
-                                self.add_log(f"작업 디렉토리 삭제 완료: {work_dir}", "INFO")
-                            else:
-                                self.add_log(f"작업 디렉토리가 이미 존재하지 않음: {work_dir}", "INFO")
-
-                            # 2. 프로젝트 설정 삭제
-                            padded_project_count = f"{project_count:04d}"
-                            delete_result = project_manager._delete_project(padded_project_count)
-
-                            if delete_result:
-                                self.add_log(f"프로젝트 전체 삭제 성공: {project_count}", "INFO")
-                                self.show_info_dialog(f"프로젝트 '{project_name}'가 완전히 삭제되었습니다.\n(설정 및 작업 파일 모두 삭제됨)")
-                                # 목록 갱신
-                                registered_projects = project_manager._get_registered_projects()
-                                if not registered_projects:
-                                    self.show_info_dialog("더 이상 등록된 프로젝트가 없습니다.")
-                                    return False
-                                # 메뉴 항목 재구성 (원래 포맷과 동일하게)
-                                menu_items = []
-                                for project_count, proj_name, proj_dir, tag, create_date in registered_projects:
-                                    current_marker = " [현재]" if str(project_count) == current_project else ""
-                                    if tag:
-                                        display_name = f"{proj_name}({tag})"
-                                    else:
-                                        display_name = proj_name
-                                    menu_items.append(f"{display_name} ({proj_dir}){current_marker}")
-                                # 삭제 후 처음부터 다시 시작
-                                continue
-                            else:
-                                self.add_log(f"프로젝트 설정 삭제 실패: {project_count}", "ERROR")
-                                self.show_error_dialog(f"프로젝트 설정 삭제 중 오류가 발생했습니다.")
-
-                        except Exception as e:
-                            self.add_log(f"전체 삭제 중 오류 발생: {e}", "ERROR")
-                            self.show_error_dialog(f"전체 삭제 중 오류가 발생했습니다:\n{e}")
-
-                # delete_option == 2는 취소이므로 continue
-
-            elif action == 2:  # 프로젝트 복제
-                self.add_log(f"프로젝트 복제 시도: {project_count} ({project_name})", "DEBUG")
-
-                # 새 작업 디렉토리 입력
-                while True:
-                    new_work_dir = self.show_input_dialog(
-                        "프로젝트 복제",
-                        "새 프로젝트의 작업 디렉토리 경로를 입력하세요:\n(예: /tmp/cccopy/my_work_clone)",
-                        ""
-                    )
-
-                    if new_work_dir is None:  # 취소
-                        break
-
-                    if not new_work_dir:
-                        self.show_error_dialog("경로를 입력해야 합니다.")
+                if action == 0:  # 프로젝트 선택
+                    if str(project_count) == current_project:
+                        self.show_info_dialog(f"이미 현재 프로젝트입니다:\n{display_name}")
                         continue
 
-                    # 중복 경로 체크
-                    if project_manager._is_path_already_used(new_work_dir):
-                        self.show_error_dialog(f"이미 등록된 경로입니다:\n{new_work_dir}\n\n다른 경로를 입력하세요.")
+                    try:
+                        self.workspace._load_project(project_name)
+                        # 4자리 패딩된 프로젝트 번호 생성
+                        padded_project_number = f"{project_count:04d}"
+                        self.workspace.current_project_number = padded_project_number  # 현재 프로젝트 번호 저장
+                        self.workspace._apply_final_config()  # 설정 적용하여 working_dir 업데이트
+                        project_manager._update_last_project(padded_project_number)
+
+                        # 프로젝트 변경시 캐시 초기화
+                        self.tracked_files_cache = None
+                        self.tracked_files_cache_time = 0
+                        self.file_state_cache.clear()
+                        self.workspace.last_production_check_time = 0  # Production 체크 시간도 초기화
+                        self.add_log("프로젝트 변경으로 캐시 초기화됨", "DEBUG")
+
+                        self.show_info_dialog(f"프로젝트가 변경되었습니다:\n{display_name}\n\n작업 경로: {self.workspace.working_dir}")  # 실제 working_dir 표시
+                        return True
+                    except Exception as e:
+                        self.show_error_dialog(f"프로젝트 변경 실패:\n{e}")
                         continue
 
-                    # 새 TAG 입력 (기본값: 원본 TAG + " (복제됨)")
-                    default_tag = f"{tag} (복제됨)" if tag else "(복제됨)"
-                    new_tag = self.show_input_dialog(
-                        "프로젝트 복제",
-                        f"새 프로젝트의 TAG를 입력하세요:",
-                        default_tag
+                elif action == 1:  # 프로젝트 편집
+                    # Curses 일시 중단
+                    curses.def_prog_mode()
+                    curses.endwin()
+
+                    try:
+                        padded_project_count = f"{project_count:04d}"
+                        changed = project_manager.edit_project(padded_project_count, project_name, tag)
+
+                        if changed and str(project_count) == current_project:
+                            # 현재 프로젝트 설정이 변경된 경우 재로드
+                            self.workspace._apply_final_config()
+                            # 캐시 초기화
+                            self.tracked_files_cache = None
+                            self.tracked_files_cache_time = 0
+                            self.file_state_cache.clear()
+                            self.workspace.last_production_check_time = 0
+                            self.add_log("프로젝트 설정 변경으로 캐시 초기화됨", "DEBUG")
+
+                    except Exception as e:
+                        self.add_log(f"프로젝트 편집 중 오류: {e}", "ERROR")
+
+                    finally:
+                        # Curses 재개
+                        curses.reset_prog_mode()
+                        self.stdscr.refresh()
+                        self.needs_redraw = True
+
+                    # 목록 갱신 (display_name도 변경될 수 있음)
+                    registered_projects = project_manager._get_registered_projects()
+                    # 현재 프로젝트 정보 다시 가져오기
+                    for pc, pn, wd, t, cd in registered_projects:
+                        if pc == project_count:
+                            project_name = pn
+                            work_dir = wd
+                            tag = t
+                            if t:
+                                display_name = f"{pn}({t})"
+                            else:
+                                display_name = pn
+                            break
+
+                    # 내부 루프 계속 -> 같은 프로젝트의 action 메뉴로 돌아감
+                    continue
+
+                elif action == 2:  # 프로젝트 삭제
+                    # 삭제 옵션 선택
+                    delete_option = self.show_choice_dialog(
+                        f"프로젝트 삭제 확인\n\n프로젝트: {display_name}\n작업 경로: {work_dir}",
+                        ["삭제(항목만 삭제, 파일 유지)", "삭제(전체 삭제)", "취소"]
                     )
 
-                    if new_tag is None:  # 취소
-                        break
+                    if delete_option == 0:  # 항목만 삭제 (파일 유지)
+                        self.add_log(f"프로젝트 항목 삭제 시도: {project_count} ({project_name})", "DEBUG")
+                        self.add_log(f"삭제할 경로: ~/.cccopy/project/{project_count:04d}/", "DEBUG")
 
-                    if not new_tag:
-                        new_tag = default_tag
+                        # 프로젝트 번호를 4자리로 패딩하여 삭제 시도
+                        padded_project_count = f"{project_count:04d}"
+                        delete_result = project_manager._delete_project(padded_project_count)
+                        if delete_result:
+                            self.add_log(f"프로젝트 항목 삭제 성공: {project_count}", "INFO")
+                            self.show_info_dialog(f"프로젝트 '{project_name}' 항목이 삭제되었습니다.\n(작업 파일은 유지됩니다)")
+                            # 목록 갱신
+                            registered_projects = project_manager._get_registered_projects()
+                            if not registered_projects:
+                                self.show_info_dialog("더 이상 등록된 프로젝트가 없습니다.")
+                                return False
+                            # 메뉴 항목 재구성 (원래 포맷과 동일하게)
+                            menu_items = []
+                            for project_count, proj_name, proj_dir, tag, create_date in registered_projects:
+                                current_marker = " [현재]" if str(project_count) == current_project else ""
+                                if tag:
+                                    display_name = f"{proj_name}({tag})"
+                                else:
+                                    display_name = proj_name
+                                menu_items.append(f"{display_name} ({proj_dir}){current_marker}")
+                            # 삭제 후 처음부터 다시 시작
+                            continue
+                        else:
+                            # 삭제 실패 (예외 발생 등)
+                            actual_path = f"~/.cccopy/project/{project_count:04d}"
+                            self.add_log(f"프로젝트 삭제 실패: {project_count}", "ERROR")
+                            self.add_log(f"삭제 실패 경로: {actual_path}", "ERROR")
+                            self.show_error_dialog(f"프로젝트 삭제 중 오류가 발생했습니다.")
 
-                    # 복제 실행
-                    padded_project_count = f"{project_count:04d}"
-                    self.add_log(f"복제 실행: {padded_project_count} → {new_work_dir} (TAG: {new_tag})", "INFO")
+                    elif delete_option == 1:  # 전체 삭제 (파일 포함)
+                        # 전체 삭제 최종 확인
+                        final_confirm = self.show_choice_dialog(
+                            f"전체 삭제 최종 확인\n\n프로젝트: {display_name}\n작업 경로: {work_dir}\n\n경고: 작업 디렉토리의 모든 파일이 삭제됩니다!\n정말로 전체 삭제하시겠습니까?",
+                            ["Yes (전체 삭제)", "No (취소)"]
+                        )
 
-                    if project_manager.clone_project(padded_project_count, new_work_dir, new_tag):
-                        self.add_log(f"프로젝트 복제 성공", "INFO")
-                        self.show_info_dialog(f"프로젝트가 복제되었습니다!\n\n원본: {display_name}\n새 작업 경로: {new_work_dir}\n새 TAG: {new_tag}")
+                        if final_confirm == 0:  # Yes, 전체 삭제 실행
+                            self.add_log(f"프로젝트 전체 삭제 시도: {project_count} ({project_name})", "DEBUG")
+                            self.add_log(f"삭제할 설정 경로: ~/.cccopy/project/{project_count:04d}/", "DEBUG")
+                            self.add_log(f"삭제할 작업 경로: {work_dir}", "DEBUG")
 
-                        # 자동 Download 실행
-                        self.add_log("프로젝트 복제 후 자동 Download를 시작합니다...", "HIGH")
-                        try:
-                            self.workspace.download()
-                            self.add_log("Download 완료", "HIGH")
-                            # Full Refresh: Download 후 정확한 상태 반영
-                            self.refresh_tree(full_refresh=True)
-                        except Exception as e:
-                            self.add_log(f"Download 실패: {e}", "ERROR")
-                            self.show_error_dialog(f"Download 중 오류가 발생했습니다:\n{e}")
+                            import shutil
+                            import os
 
-                        # 목록 갱신
-                        registered_projects = project_manager._get_registered_projects()
-                        # 메뉴 항목 재구성
-                        menu_items = []
-                        for proj_count, proj_name, proj_dir, proj_tag, create_date in registered_projects:
-                            current_marker = " [현재]" if str(proj_count) == current_project else ""
-                            if proj_tag:
-                                proj_display_name = f"{proj_name}({proj_tag})"
-                            else:
-                                proj_display_name = proj_name
-                            menu_items.append(f"{proj_display_name} ({proj_dir}){current_marker}")
+                            try:
+                                # 1. 작업 디렉토리 삭제
+                                if os.path.exists(work_dir):
+                                    shutil.rmtree(work_dir)
+                                    self.add_log(f"작업 디렉토리 삭제 완료: {work_dir}", "INFO")
+                                else:
+                                    self.add_log(f"작업 디렉토리가 이미 존재하지 않음: {work_dir}", "INFO")
 
-                        # 복제 후 처음부터 다시 시작
-                        break
-                    else:
-                        self.add_log(f"프로젝트 복제 실패", "ERROR")
-                        self.show_error_dialog("프로젝트 복제에 실패했습니다.")
-                        break
+                                # 2. 프로젝트 설정 삭제
+                                padded_project_count = f"{project_count:04d}"
+                                delete_result = project_manager._delete_project(padded_project_count)
+
+                                if delete_result:
+                                    self.add_log(f"프로젝트 전체 삭제 성공: {project_count}", "INFO")
+                                    self.show_info_dialog(f"프로젝트 '{project_name}'가 완전히 삭제되었습니다.\n(설정 및 작업 파일 모두 삭제됨)")
+                                    # 목록 갱신
+                                    registered_projects = project_manager._get_registered_projects()
+                                    if not registered_projects:
+                                        self.show_info_dialog("더 이상 등록된 프로젝트가 없습니다.")
+                                        return False
+                                    # 메뉴 항목 재구성 (원래 포맷과 동일하게)
+                                    menu_items = []
+                                    for project_count, proj_name, proj_dir, tag, create_date in registered_projects:
+                                        current_marker = " [현재]" if str(project_count) == current_project else ""
+                                        if tag:
+                                            display_name = f"{proj_name}({tag})"
+                                        else:
+                                            display_name = proj_name
+                                        menu_items.append(f"{display_name} ({proj_dir}){current_marker}")
+                                    # 삭제 후 처음부터 다시 시작
+                                    continue
+                                else:
+                                    self.add_log(f"프로젝트 설정 삭제 실패: {project_count}", "ERROR")
+                                    self.show_error_dialog(f"프로젝트 설정 삭제 중 오류가 발생했습니다.")
+
+                            except Exception as e:
+                                self.add_log(f"전체 삭제 중 오류 발생: {e}", "ERROR")
+                                self.show_error_dialog(f"전체 삭제 중 오류가 발생했습니다:\n{e}")
+
+                    # delete_option == 2는 취소이므로 continue
+                    # 삭제 후 외부 루프로
+                    break
+
+                elif action == 3:  # 프로젝트 복제
+                    self.add_log(f"프로젝트 복제 시도: {project_count} ({project_name})", "DEBUG")
+
+                    # 새 작업 디렉토리 입력
+                    while True:
+                        new_work_dir = self.show_input_dialog(
+                            "프로젝트 복제",
+                            "새 프로젝트의 작업 디렉토리 경로를 입력하세요:\n(예: /tmp/cccopy/my_work_clone)",
+                            ""
+                        )
+
+                        if new_work_dir is None:  # 취소
+                            break
+
+                        if not new_work_dir:
+                            self.show_error_dialog("경로를 입력해야 합니다.")
+                            continue
+
+                        # 중복 경로 체크
+                        if project_manager._is_path_already_used(new_work_dir):
+                            self.show_error_dialog(f"이미 등록된 경로입니다:\n{new_work_dir}\n\n다른 경로를 입력하세요.")
+                            continue
+
+                        # 새 TAG 입력 (기본값: 원본 TAG + " (복제됨)")
+                        default_tag = f"{tag} (복제됨)" if tag else "(복제됨)"
+                        new_tag = self.show_input_dialog(
+                            "프로젝트 복제",
+                            f"새 프로젝트의 TAG를 입력하세요:",
+                            default_tag
+                        )
+
+                        if new_tag is None:  # 취소
+                            break
+
+                        if not new_tag:
+                            new_tag = default_tag
+
+                        # 복제 실행
+                        padded_project_count = f"{project_count:04d}"
+                        self.add_log(f"복제 실행: {padded_project_count} → {new_work_dir} (TAG: {new_tag})", "INFO")
+
+                        if project_manager.clone_project(padded_project_count, new_work_dir, new_tag):
+                            self.add_log(f"프로젝트 복제 성공", "INFO")
+                            self.show_info_dialog(f"프로젝트가 복제되었습니다!\n\n원본: {display_name}\n새 작업 경로: {new_work_dir}\n새 TAG: {new_tag}")
+
+                            # 자동 Download 실행
+                            self.add_log("프로젝트 복제 후 자동 Download를 시작합니다...", "HIGH")
+                            try:
+                                self.workspace.download()
+                                self.add_log("Download 완료", "HIGH")
+                                # Full Refresh: Download 후 정확한 상태 반영
+                                self.refresh_tree(full_refresh=True)
+                            except Exception as e:
+                                self.add_log(f"Download 실패: {e}", "ERROR")
+                                self.show_error_dialog(f"Download 중 오류가 발생했습니다:\n{e}")
+
+                            # 목록 갱신
+                            registered_projects = project_manager._get_registered_projects()
+                            # 메뉴 항목 재구성
+                            menu_items = []
+                            for proj_count, proj_name, proj_dir, proj_tag, create_date in registered_projects:
+                                current_marker = " [현재]" if str(proj_count) == current_project else ""
+                                if proj_tag:
+                                    proj_display_name = f"{proj_name}({proj_tag})"
+                                else:
+                                    proj_display_name = proj_name
+                                menu_items.append(f"{proj_display_name} ({proj_dir}){current_marker}")
+
+                            # 복제 후 처음부터 다시 시작
+                            break
+                        else:
+                            self.add_log(f"프로젝트 복제 실패", "ERROR")
+                            self.show_error_dialog("프로젝트 복제에 실패했습니다.")
+                            break
 
     def show_log_file_selector(self):
         """로그 파일 선택 다이얼로그"""
