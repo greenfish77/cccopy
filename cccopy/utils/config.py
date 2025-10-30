@@ -611,6 +611,10 @@ class ProjectSelectionManager:
                 # 파일이 변경되었는지 확인
                 if mtime_after > mtime_before:
                     display_message(f"프로젝트 설정이 변경되었습니다: {display_name}", "INFO")
+
+                    # SOURCES 변경 여부 확인 및 안내
+                    self._check_and_notify_sources_change(config_file)
+
                     return True
                 else:
                     display_message(f"프로젝트 설정이 변경되지 않았습니다: {display_name}", "INFO")
@@ -1552,6 +1556,42 @@ class ProjectManager:
 
         return f"{hash_value:08x}"
 
+    def _check_and_notify_sources_change(self, config_file):
+        """SOURCES 변경 여부 확인 및 사용자 안내
+
+        Args:
+            config_file: 수정된 프로젝트 설정 파일 경로
+        """
+        import configparser
+
+        try:
+            # 수정된 설정 파일 읽기
+            new_config = configparser.ConfigParser()
+            new_config.read(config_file, encoding='utf-8')
+
+            # SOURCES 섹션 존재 여부 확인
+            if new_config.has_section('SOURCES'):
+                display_message("=" * 60, "INFO")
+                display_message("[안내] SOURCES 패턴이 변경되었습니다", "INFO")
+                display_message("", "INFO")
+                display_message("다음 Download 실행 시:", "INFO")
+                display_message("  - 새로 추가된 파일: Production Git에 자동 추가", "INFO")
+                display_message("  - SOURCES에서 제외된 파일: Git 추적 중단 (파일은 유지)", "INFO")
+                display_message("", "INFO")
+                display_message("변경된 SOURCES 패턴:", "INFO")
+
+                sources = []
+                for key in sorted(new_config.options('SOURCES')):
+                    value = new_config.get('SOURCES', key)
+                    sources.append(f"  {key}={value}")
+                    display_message(f"  {key}={value}", "INFO")
+
+                display_message("=" * 60, "INFO")
+
+        except Exception as e:
+            # 에러가 발생해도 프로젝트 편집은 성공으로 처리
+            display_message(f"SOURCES 변경 확인 중 오류 (무시): {e}", "DEBUG")
+
     def _sync_gitignore_from_production(self, production_perm):
         """Production에서 Work로 .gitignore 동기화"""
         production_gitignore = os.path.join(self.production_dir, '.gitignore')
@@ -2071,6 +2111,30 @@ class ProjectManager:
                             display_message("  (SOURCES 외 파일은 의도적으로 untracked 상태 유지)", "INFO")
                     else:
                         display_message("Production 변경 사항 없음", "DEBUG")
+
+                    # SOURCES 패턴 변경에 따른 Git 동기화
+                    display_message("SOURCES 패턴에 따라 Production Git을 동기화합니다...", "INFO")
+
+                    # SOURCES 패턴에 매칭되는 파일 수집 (.gitignore는 적용하지 않음 - Production Git 동기화용)
+                    source_files = self.collect_files(use_gitignore=False, include_work_only=False)
+                    source_rel_paths = [rel_path for _, rel_path in source_files]
+
+                    display_message(f"  SOURCES 패턴으로 수집된 파일: {len(source_rel_paths)}개", "DEBUG")
+                    for f in source_rel_paths[:5]:
+                        display_message(f"    - {f}", "DEBUG")
+
+                    # Git에 SOURCES 파일 동기화
+                    sync_changes = GitHelper.sync_sources_to_git(
+                        self.production_dir,
+                        source_rel_paths,
+                        production_perm=production_perm
+                    )
+
+                    # 변경사항이 있으면 커밋 (추가된 파일만)
+                    if sync_changes['added']:
+                        commit_msg = f"Auto-commit: Add {len(sync_changes['added'])} files to SOURCES tracking"
+                        GitHelper.commit_all(self.production_dir, commit_msg, production_perm=production_perm)
+                        display_message("SOURCES 파일 추가 커밋 완료", "INFO")
 
                 # Work Git 초기화 (필요시)
                 is_first_init = not GitHelper.is_git_repo(self.working_dir)

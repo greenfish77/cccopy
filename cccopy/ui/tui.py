@@ -1832,32 +1832,15 @@ class CCCopyTUI:
 
             directories = sources_valid_dirs
 
-            # 5. Git tracked files로 필터링 (background에서 로딩 가능)
+            # 5. Git tracked files는 Background에서 로딩만 (필터링에는 사용 안 함)
+            # SOURCES 패턴으로 필터링된 파일 + 파일시스템에 있는 파일 모두 표시
+            # 이유: Download 후 Work에 파일이 복사되었지만 아직 Git commit 안 된 경우에도 표시
             if async_mode:
                 # Background에서 git ls-files 로딩 시작 (UI는 blocking 안 됨)
                 self.get_git_tracked_files(base_dir, async_mode=True)
-                # 일단 SOURCES 패턴 필터링된 목록 반환 (즉시)
             else:
-                # 동기 모드: Git tracked files로 추가 필터링
-                tracked_files = self.get_git_tracked_files(base_dir, async_mode=False)
-                if tracked_files:
-                    tracked_set = set(tracked_files)
-                    # 파일 필터링 (SOURCES 필터링 + Git tracked)
-                    files = [f for f in files if (
-                        os.path.join(current_path, f) if current_path else f
-                    ) in tracked_set]
-                    # 디렉토리 필터링 (SOURCES 필터링 + Git tracked 파일이 있는 디렉토리)
-                    git_valid_dirs = set()
-                    for tf in tracked_files:
-                        if current_path:
-                            if not tf.startswith(current_path + "/"):
-                                continue
-                            rel = tf[len(current_path) + 1:]
-                        else:
-                            rel = tf
-                        if "/" in rel:
-                            git_valid_dirs.add(rel.split("/")[0])
-                    directories = directories & git_valid_dirs
+                # 동기 모드: Git tracked files 로딩 (상태 표시용, 필터링에는 미사용)
+                self.get_git_tracked_files(base_dir, async_mode=False)
 
             return directories, files
 

@@ -410,3 +410,86 @@ class GitHelper:
         except Exception as e:
             display_message(f"Get git log failed: {e}", "DEBUG")
             return []
+
+    @staticmethod
+    def sync_sources_to_git(directory, source_file_list, production_perm=None):
+        """SOURCES 패턴에 매칭되는 파일들을 Git에 동기화 (추가만 수행)
+
+        - Untracked 파일: Git에 추가
+        - SOURCES에서 제외된 파일: Git tracking 유지 (히스토리 보존)
+
+        Production은 팀 공유 공간이므로, 한 프로젝트가 SOURCES에서 제외해도
+        다른 프로젝트나 파일 히스토리 보존을 위해 Git tracking은 유지합니다.
+        명시적 삭제가 필요하면 사용자가 직접 Production에서 git rm 실행.
+
+        Args:
+            directory: Git 저장소 경로
+            source_file_list: SOURCES 패턴에 매칭되는 파일들의 상대 경로 리스트
+            production_perm: Production 권한 관리자
+
+        Returns:
+            dict: {'added': [...], 'removed': [...]} 변경 내용 (removed는 항상 빈 리스트)
+        """
+        import fnmatch
+
+        changes = {'added': [], 'removed': []}
+
+        try:
+            # 1. Git에서 현재 tracked 중인 파일 목록 가져오기
+            tracked_output = GitHelper.run_git_command(
+                ['ls-files'],
+                cwd=directory,
+                capture_output=True,
+                production_perm=production_perm
+            )
+
+            tracked_files = set()
+            if tracked_output:
+                tracked_files = set(line.strip() for line in tracked_output.strip().split('\n') if line.strip())
+
+            # SOURCES 파일 집합
+            sources_files = set(source_file_list)
+
+            # 2. Untracked 파일 중 SOURCES에 속한 파일 찾기
+            # git ls-files --others --exclude-standard: .gitignore 제외하고 untracked 파일 모두 표시
+            untracked_output = GitHelper.run_git_command(
+                ['ls-files', '--others', '--exclude-standard'],
+                cwd=directory,
+                capture_output=True,
+                production_perm=production_perm
+            )
+
+            untracked_in_sources = []
+            if untracked_output:
+                for line in untracked_output.strip().split('\n'):
+                    rel_path = line.strip()
+                    if rel_path and rel_path in sources_files:
+                        untracked_in_sources.append(rel_path)
+
+            # 3. SOURCES에 속하지만 Git에 untracked인 파일 추가
+            if untracked_in_sources:
+                display_message(f"SOURCES에 속한 untracked 파일 {len(untracked_in_sources)}개를 Git에 추가합니다...", "INFO")
+                for rel_path in untracked_in_sources[:5]:  # 최대 5개만 표시
+                    display_message(f"  + {rel_path}", "INFO")
+                if len(untracked_in_sources) > 5:
+                    display_message(f"  ... 외 {len(untracked_in_sources) - 5}개", "INFO")
+
+                GitHelper.add_files(directory, untracked_in_sources, production_perm=production_perm)
+                changes['added'] = untracked_in_sources
+
+            # 4. SOURCES에서 제외된 파일은 Git에 유지 (히스토리 보존)
+            # Production은 팀 공유 공간이므로, 한 프로젝트가 SOURCES에서 제외해도
+            # 다른 프로젝트나 히스토리 보존을 위해 Git tracking은 유지
+            # 명시적 삭제가 필요하면 사용자가 직접 git rm 실행
+
+            # 변경사항 요약
+            if changes['added']:
+                display_message(f"SOURCES 동기화 완료: +{len(changes['added'])} 파일 추가", "INFO")
+            else:
+                display_message("SOURCES 동기화: 변경사항 없음", "DEBUG")
+
+            return changes
+
+        except Exception as e:
+            display_message(f"SOURCES 동기화 중 오류: {e}", "ERROR")
+            return changes
