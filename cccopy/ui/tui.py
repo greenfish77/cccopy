@@ -131,9 +131,9 @@ class FileTree:
         if not os.path.exists(base_dir):
             return
 
-        # 파일 수집
+        # 파일 수집 (Git tracked 파일만 - 성능 최적화)
         try:
-            files = self.workspace.collect_files(use_gitignore=True, include_work_only=True)
+            files = self.workspace.collect_files_from_git(include_work_only=True)
         except Exception:
             files = []
 
@@ -2866,7 +2866,7 @@ class CCCopyTUI:
             "=== 파일 상태 표시 ===",
             "[S]AME        : Production과 Work가 동일",
             "[M]ODIFIED    : Work에서 수정된 파일",
-            "[U]PDATED     : Production에서 업데이트된 파일",
+            "[U]PDATED     : Production에서 업데이트된 파일 ([D]ownload로 동기화 필요)",
             "[C]ONFLICTED  : 양쪽 모두 수정되어 충돌",
             "[ ]PENDING    : 상태 체크 진행 중인 파일",
             "",
@@ -4308,8 +4308,8 @@ class CCCopyTUI:
             import threading
             def upload_check_task():
                 try:
-                    # 업로드 가능한 파일(Modified 상태) 및 충돌 파일 수집
-                    files = self.workspace.collect_files(use_gitignore=True, include_work_only=True)
+                    # 업로드 가능한 파일(Modified 상태) 및 충돌 파일 수집 (Git tracked 파일만)
+                    files = self.workspace.collect_files_from_git(include_work_only=True)
                     upload_files = []
                     conflicted_files = []
 

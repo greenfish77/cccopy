@@ -613,7 +613,9 @@ class ProjectSelectionManager:
                     display_message(f"프로젝트 설정이 변경되었습니다: {display_name}", "INFO")
 
                     # SOURCES 변경 여부 확인 및 안내
-                    self._check_and_notify_sources_change(config_file)
+                    # workspace가 ProjectManager 인스턴스인 경우에만 호출
+                    if hasattr(self.workspace, '_check_and_notify_sources_change'):
+                        self.workspace._check_and_notify_sources_change(config_file)
 
                     return True
                 else:
@@ -1812,8 +1814,96 @@ class ProjectManager:
         cmd = f"[ -f {production_file_escaped} ] && mkdir -p {backup_dir_escaped} && cp -p {production_file_escaped} {backup_path_escaped} || true"
         return cmd
 
+    def collect_files_from_git(self, include_work_only=False):
+        """Git tracked 파일만 수집 (최적화 버전)
+
+        Production Git에 추가된 파일만 대상으로 하므로 파일시스템 전체 스캔 불필요.
+        SOURCES 패턴에 매칭되는 파일만 반환.
+
+        Args:
+            include_work_only: True면 Work 전용 파일도 포함 (Upload용)
+
+        Returns:
+            list of (production_file_path, rel_path) tuples
+        """
+        import fnmatch
+
+        source_patterns = self.get_source_patterns()
+        exclude_patterns = self.get_exclude_patterns()
+        matched_files = set()
+
+        # Production Git tracked 파일 가져오기
+        if GitHelper.is_git_repo(self.production_dir):
+            try:
+                # git ls-files로 tracked 파일만 조회
+                tracked_files = GitHelper.run_git_command(
+                    ['ls-files'],
+                    cwd=self.production_dir,
+                    capture_output=True
+                ).strip().split('\n')
+
+                for rel_path in tracked_files:
+                    if not rel_path:
+                        continue
+
+                    # SOURCES 패턴 매칭 확인
+                    matched = False
+                    for pattern in source_patterns:
+                        if fnmatch.fnmatch(rel_path, pattern):
+                            matched = True
+                            break
+                        # 디렉토리 패턴 (AAA/**)
+                        elif pattern.endswith('**'):
+                            dir_prefix = pattern.rstrip('*').rstrip('/')
+                            if rel_path.startswith(dir_prefix + '/') or rel_path == dir_prefix:
+                                matched = True
+                                break
+
+                    if matched:
+                        production_path = os.path.join(self.production_dir, rel_path)
+                        matched_files.add(production_path)
+
+            except Exception as e:
+                display_message(f"Git ls-files 실패, glob 방식으로 전환: {e}", "DEBUG")
+                # Git 실패시 기존 방식으로 폴백
+                return self.collect_files(use_gitignore=False, include_work_only=include_work_only)
+
+        # Work에서도 파일 수집 (Upload용)
+        if include_work_only:
+            import glob
+            for pattern in source_patterns:
+                full_pattern = os.path.join(self.working_dir, pattern)
+                for path in glob.glob(full_pattern, recursive=True):
+                    if os.path.isfile(path):
+                        # Work 파일을 Production 경로로 변환하여 추가
+                        rel_path = os.path.relpath(path, self.working_dir)
+                        production_path = os.path.join(self.production_dir, rel_path)
+                        matched_files.add(production_path)
+
+        # 제외 패턴 적용
+        filtered_files = []
+        for file_path in matched_files:
+            rel_path = os.path.relpath(file_path, self.production_dir)
+
+            exclude = False
+
+            # config.ini EXCLUDES 패턴 체크
+            for exclude_pattern in exclude_patterns:
+                if fnmatch.fnmatch(rel_path, exclude_pattern) or fnmatch.fnmatch(file_path, exclude_pattern):
+                    exclude = True
+                    break
+
+            if not exclude:
+                filtered_files.append((file_path, rel_path))
+
+        return filtered_files
+
     def collect_files(self, use_gitignore=False, include_work_only=False):
-        """패턴에 매치되는 파일 수집 (선택적으로 .gitignore 적용)"""
+        """패턴에 매치되는 파일 수집 (선택적으로 .gitignore 적용)
+
+        NOTE: 이 함수는 파일시스템 전체를 스캔합니다.
+        Git repo가 초기화된 경우 collect_files_from_git() 사용을 권장합니다.
+        """
         import glob
         import fnmatch
 
@@ -1909,12 +1999,20 @@ class ProjectManager:
                     status_output = GitHelper.run_git_command(['status', '--short'], cwd=self.production_dir, capture_output=True)
 
                     if status_output and status_output.strip():
-                        # 변경된 파일 목록 출력
-                        display_message("Production에서 직접 수정된 파일:", "INFO")
-                        for line in status_output.strip().split('\n'):
-                            if line.strip():
-                                formatted_line = GitHelper.format_git_status_line(line)
-                                display_message(f"  {formatted_line}", "INFO")
+                        # 변경된 파일 목록 요약 출력
+                        changed_lines = [line for line in status_output.strip().split('\n') if line.strip()]
+                        display_message(f"Production에서 직접 수정된 파일: {len(changed_lines)}개", "INFO")
+                        # 처음 5개만 상세 표시
+                        for line in changed_lines[:5]:
+                            formatted_line = GitHelper.format_git_status_line(line)
+                            display_message(f"  {formatted_line}", "INFO")
+                        if len(changed_lines) > 5:
+                            display_message(f"  ... 외 {len(changed_lines) - 5}개 파일 (상세 로그는 DEBUG 레벨 참조)", "INFO")
+
+                        # DEBUG 레벨로 전체 목록 출력
+                        for line in changed_lines[5:]:
+                            formatted_line = GitHelper.format_git_status_line(line)
+                            display_message(f"  {formatted_line}", "DEBUG")
 
                         display_message("Production 변경 사항 자동 커밋 중...", "INFO")
 
@@ -1924,25 +2022,31 @@ class ProjectManager:
                         # 변경된 파일 중 SOURCES 패턴에 매칭되는 파일만 추출
                         changed_files_in_sources = []
                         source_patterns = self.get_source_patterns()
+                        display_message(f"  SOURCES 패턴: {source_patterns}", "DEBUG")
                         import fnmatch
 
-                        for line in status_output.strip().split('\n'):
-                            if line.strip():
-                                # git status --short 형식: "XY filename"
-                                rel_path = line[3:].strip()  # 상태 코드 제거
+                        for line in changed_lines:
+                            # git status --short 형식: "XY filename" 또는 "X filename" (Git 1.8)
+                            # Git 1.8.3: "M AAA/nnn.txt" (1글자 + 공백)
+                            # Git 2.x+: " M AAA/nnn.txt" (2글자)
+                            # 공백 이후가 파일명
+                            parts = line.split(None, 1)  # 첫 공백으로 분리
+                            if len(parts) < 2:
+                                continue
+                            rel_path = parts[1].strip()
 
-                                # SOURCES 패턴 매칭 확인
-                                for pattern in source_patterns:
-                                    # glob 패턴 매칭
-                                    if fnmatch.fnmatch(rel_path, pattern):
+                            # SOURCES 패턴 매칭 확인
+                            for pattern in source_patterns:
+                                # glob 패턴 매칭
+                                if fnmatch.fnmatch(rel_path, pattern):
+                                    changed_files_in_sources.append(rel_path)
+                                    break
+                                # 디렉토리 패턴 (AAA/**)
+                                elif pattern.endswith('**'):
+                                    dir_prefix = pattern.rstrip('*').rstrip('/')
+                                    if rel_path.startswith(dir_prefix + '/') or rel_path == dir_prefix:
                                         changed_files_in_sources.append(rel_path)
                                         break
-                                    # 디렉토리 패턴 (AAA/**)
-                                    elif pattern.endswith('**'):
-                                        dir_prefix = pattern.rstrip('*').rstrip('/')
-                                        if rel_path.startswith(dir_prefix + '/') or rel_path == dir_prefix:
-                                            changed_files_in_sources.append(rel_path)
-                                            break
 
                         if changed_files_in_sources:
                             display_message(f"  SOURCES에 속한 변경 파일 {len(changed_files_in_sources)}개를 커밋합니다", "INFO")
@@ -2050,8 +2154,18 @@ class ProjectManager:
                     display_message(f"  추가할 파일 개수: {len(rel_paths)}", "INFO")
 
                     # 선택적 git add (SOURCES 필터링 적용)
-                    GitHelper.add_files(self.production_dir, rel_paths, production_perm=production_perm)
-                    GitHelper.commit_all(self.production_dir, "Initial production repository", production_perm=production_perm)
+                    if rel_paths:
+                        GitHelper.add_files(self.production_dir, rel_paths, production_perm=production_perm)
+                        GitHelper.commit_all(self.production_dir, "Initial production repository", production_perm=production_perm)
+                    else:
+                        display_message("추가할 파일이 없어 빈 초기 커밋을 생성합니다.", "INFO")
+                        # 빈 커밋 생성 (--allow-empty 옵션)
+                        import getpass
+                        user_name = getpass.getuser()
+                        user_email = f"{user_name}@cccopy.com"
+                        author = f"{user_name} <{user_email}>"
+                        GitHelper.run_git_command(['commit', '--allow-empty', '--author', author, '-m', 'Initial empty repository'],
+                                                 cwd=self.production_dir, production_perm=production_perm)
 
                     # Initial commit 완료 - 이후 auto-commit skip (SOURCES 외 파일은 의도적으로 untracked 유지)
                     display_message("Initial commit 완료 - SOURCES 외 파일은 Git에서 제외됨", "INFO")
@@ -2063,12 +2177,20 @@ class ProjectManager:
                     status_output = GitHelper.run_git_command(['status', '--short'], cwd=self.production_dir, capture_output=True)
 
                     if status_output and status_output.strip():
-                        # 변경된 파일 목록 출력
-                        display_message("Production에서 직접 수정된 파일:", "INFO")
-                        for line in status_output.strip().split('\n'):
-                            if line.strip():
-                                formatted_line = GitHelper.format_git_status_line(line)
-                                display_message(f"  {formatted_line}", "INFO")
+                        # 변경된 파일 목록 요약 출력
+                        changed_lines = [line for line in status_output.strip().split('\n') if line.strip()]
+                        display_message(f"Production에서 직접 수정된 파일: {len(changed_lines)}개", "INFO")
+                        # 처음 5개만 상세 표시
+                        for line in changed_lines[:5]:
+                            formatted_line = GitHelper.format_git_status_line(line)
+                            display_message(f"  {formatted_line}", "INFO")
+                        if len(changed_lines) > 5:
+                            display_message(f"  ... 외 {len(changed_lines) - 5}개 파일 (상세 로그는 DEBUG 레벨 참조)", "INFO")
+
+                        # DEBUG 레벨로 전체 목록 출력
+                        for line in changed_lines[5:]:
+                            formatted_line = GitHelper.format_git_status_line(line)
+                            display_message(f"  {formatted_line}", "DEBUG")
 
                         display_message("Production 변경 사항 자동 커밋 중...", "INFO")
 
@@ -2150,9 +2272,9 @@ class ProjectManager:
                 if gitignore_changed:
                     self._refresh_git_cache_if_needed(self.working_dir, gitignore_changed)
 
-                # 파일 수집 및 상태 확인 (.gitignore 패턴 적용)
-                files = self.collect_files(use_gitignore=True)
-                display_message(f"파일 검색 완료: {len(files)}개 (.gitignore 적용됨)", "INFO")
+                # 파일 수집 및 상태 확인 (Git tracked 파일만 - 성능 최적화)
+                files = self.collect_files_from_git(include_work_only=False)
+                display_message(f"파일 검색 완료: {len(files)}개 (Git tracked files)", "INFO")
 
                 if not files:
                     display_message("수집된 파일이 없습니다.", "WARNING")
@@ -2291,12 +2413,20 @@ class ProjectManager:
                     status_output = GitHelper.run_git_command(['status', '--short'], cwd=self.production_dir, capture_output=True)
 
                     if status_output and status_output.strip():
-                        # 변경된 파일 목록 출력
-                        display_message("Production에서 직접 수정된 파일:", "INFO")
-                        for line in status_output.strip().split('\n'):
-                            if line.strip():
-                                formatted_line = GitHelper.format_git_status_line(line)
-                                display_message(f"  {formatted_line}", "INFO")
+                        # 변경된 파일 목록 요약 출력
+                        changed_lines = [line for line in status_output.strip().split('\n') if line.strip()]
+                        display_message(f"Production에서 직접 수정된 파일: {len(changed_lines)}개", "INFO")
+                        # 처음 5개만 상세 표시
+                        for line in changed_lines[:5]:
+                            formatted_line = GitHelper.format_git_status_line(line)
+                            display_message(f"  {formatted_line}", "INFO")
+                        if len(changed_lines) > 5:
+                            display_message(f"  ... 외 {len(changed_lines) - 5}개 파일 (상세 로그는 DEBUG 레벨 참조)", "INFO")
+
+                        # DEBUG 레벨로 전체 목록 출력
+                        for line in changed_lines[5:]:
+                            formatted_line = GitHelper.format_git_status_line(line)
+                            display_message(f"  {formatted_line}", "DEBUG")
 
                         display_message("Production 변경 사항 자동 커밋 중...", "INFO")
 
@@ -2306,25 +2436,31 @@ class ProjectManager:
                         # 변경된 파일 중 SOURCES 패턴에 매칭되는 파일만 추출
                         changed_files_in_sources = []
                         source_patterns = self.get_source_patterns()
+                        display_message(f"  SOURCES 패턴: {source_patterns}", "DEBUG")
                         import fnmatch
 
-                        for line in status_output.strip().split('\n'):
-                            if line.strip():
-                                # git status --short 형식: "XY filename"
-                                rel_path = line[3:].strip()  # 상태 코드 제거
+                        for line in changed_lines:
+                            # git status --short 형식: "XY filename" 또는 "X filename" (Git 1.8)
+                            # Git 1.8.3: "M AAA/nnn.txt" (1글자 + 공백)
+                            # Git 2.x+: " M AAA/nnn.txt" (2글자)
+                            # 공백 이후가 파일명
+                            parts = line.split(None, 1)  # 첫 공백으로 분리
+                            if len(parts) < 2:
+                                continue
+                            rel_path = parts[1].strip()
 
-                                # SOURCES 패턴 매칭 확인
-                                for pattern in source_patterns:
-                                    # glob 패턴 매칭
-                                    if fnmatch.fnmatch(rel_path, pattern):
+                            # SOURCES 패턴 매칭 확인
+                            for pattern in source_patterns:
+                                # glob 패턴 매칭
+                                if fnmatch.fnmatch(rel_path, pattern):
+                                    changed_files_in_sources.append(rel_path)
+                                    break
+                                # 디렉토리 패턴 (AAA/**)
+                                elif pattern.endswith('**'):
+                                    dir_prefix = pattern.rstrip('*').rstrip('/')
+                                    if rel_path.startswith(dir_prefix + '/') or rel_path == dir_prefix:
                                         changed_files_in_sources.append(rel_path)
                                         break
-                                    # 디렉토리 패턴 (AAA/**)
-                                    elif pattern.endswith('**'):
-                                        dir_prefix = pattern.rstrip('*').rstrip('/')
-                                        if rel_path.startswith(dir_prefix + '/') or rel_path == dir_prefix:
-                                            changed_files_in_sources.append(rel_path)
-                                            break
 
                         if changed_files_in_sources:
                             display_message(f"  SOURCES에 속한 변경 파일 {len(changed_files_in_sources)}개를 커밋합니다", "INFO")
@@ -2336,9 +2472,9 @@ class ProjectManager:
                     else:
                         display_message("Production 변경 사항 없음", "DEBUG")
 
-                # 업로드 가능한 파일 검색 (.gitignore 패턴 적용, Work 전용 파일도 포함)
+                # 업로드 가능한 파일 검색 (Git tracked 파일만 - 성능 최적화)
                 display_message("업로드 가능한 파일 검색 중...", "INFO")
-                files = self.collect_files(use_gitignore=True, include_work_only=True)
+                files = self.collect_files_from_git(include_work_only=True)
 
                 modified_files = []
                 conflicted_files = []
