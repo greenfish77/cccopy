@@ -1558,8 +1558,133 @@ class ProjectManager:
 
         return f"{hash_value:08x}"
 
+    def _cleanup_work_files_outside_sources(self):
+        """Work 디렉토리에서 SOURCES 규칙 밖의 파일 자동 정리
+
+        프로젝트 편집으로 SOURCES 패턴이 변경되어 일부 파일이 규칙에서 제외될 경우:
+        1. Git에서 tracked 중인 파일 목록 가져오기
+        2. 현재 SOURCES 패턴과 비교하여 제외된 파일 찾기
+        3. 제외된 파일이 있으면:
+           a. Work Git에 현재 상태 백업 커밋
+           b. Work 디렉토리 및 Git에서 파일 삭제
+           c. 삭제 내용 커밋
+        """
+        import fnmatch
+
+        try:
+            # 1. Git tracked 파일 목록 가져오기
+            tracked_output = GitHelper.run_git_command(
+                ['ls-files'],
+                cwd=self.working_dir,
+                capture_output=True
+            )
+
+            if not tracked_output or not tracked_output.strip():
+                display_message("  Git에 tracked 파일이 없습니다. 정리할 것이 없습니다.", "INFO")
+                return
+
+            tracked_files = [line.strip() for line in tracked_output.strip().split('\n') if line.strip()]
+
+            # 2. 현재 SOURCES/EXCLUDES 패턴 가져오기
+            source_patterns = self.get_source_patterns()
+            exclude_patterns = self.get_exclude_patterns()
+
+            # 3. SOURCES에서 제외된 파일 찾기
+            files_to_remove = []
+            for rel_path in tracked_files:
+                # SOURCES 패턴 매칭 확인
+                matched = False
+                for pattern in source_patterns:
+                    if fnmatch.fnmatch(rel_path, pattern):
+                        matched = True
+                        break
+                    # 디렉토리 패턴 (AAA/**)
+                    elif pattern.endswith('**'):
+                        dir_prefix = pattern.rstrip('*').rstrip('/')
+                        if rel_path.startswith(dir_prefix + '/') or rel_path == dir_prefix:
+                            matched = True
+                            break
+
+                if not matched:
+                    # SOURCES에 매칭되지 않으면 제거 대상
+                    files_to_remove.append(rel_path)
+                    continue
+
+                # EXCLUDES 패턴 확인
+                exclude = False
+                work_file = os.path.join(self.working_dir, rel_path)
+                for exclude_pattern in exclude_patterns:
+                    if fnmatch.fnmatch(rel_path, exclude_pattern) or fnmatch.fnmatch(work_file, exclude_pattern):
+                        exclude = True
+                        break
+
+                if exclude:
+                    # EXCLUDES에 매칭되면 제거 대상
+                    files_to_remove.append(rel_path)
+
+            if not files_to_remove:
+                display_message("  모든 파일이 SOURCES 규칙에 부합합니다. 정리할 것이 없습니다.", "INFO")
+                return
+
+            display_message(f"\n  SOURCES 규칙에서 제외된 파일 {len(files_to_remove)}개 발견:", "WARNING")
+            for f in files_to_remove[:5]:
+                display_message(f"    - {f}", "WARNING")
+            if len(files_to_remove) > 5:
+                display_message(f"    ... 외 {len(files_to_remove) - 5}개", "WARNING")
+
+            # 4. Work Git 상태 확인
+            status_output = GitHelper.run_git_command(
+                ['status', '--porcelain'],
+                cwd=self.working_dir,
+                capture_output=True
+            )
+
+            has_changes = status_output and status_output.strip()
+
+            # 5. 백업 커밋 (변경사항이 있는 경우만)
+            if has_changes:
+                display_message("\n  [1단계] 현재 상태를 Work Git에 백업 커밋합니다...", "INFO")
+                GitHelper.run_git_command(['add', '--all', '.'], cwd=self.working_dir)
+                GitHelper.commit_all(
+                    self.working_dir,
+                    "Backup before SOURCES cleanup: Files excluded from new SOURCES pattern"
+                )
+                display_message("  백업 커밋 완료", "INFO")
+
+            # 6. 파일 삭제 (git rm 사용)
+            display_message("\n  [2단계] SOURCES 규칙 밖의 파일을 삭제합니다...", "INFO")
+            for file_to_remove in files_to_remove:
+                try:
+                    # git rm 실행 (파일 삭제 + Git에서 제거)
+                    GitHelper.run_git_command(
+                        ['rm', file_to_remove],
+                        cwd=self.working_dir
+                    )
+                except Exception as e:
+                    display_message(f"  파일 삭제 실패 (계속 진행): {file_to_remove} - {e}", "WARN")
+
+            # 7. 삭제 커밋
+            display_message("\n  [3단계] 삭제 내용을 커밋합니다...", "INFO")
+            GitHelper.commit_all(
+                self.working_dir,
+                f"Remove files outside SOURCES pattern (removed {len(files_to_remove)} files)"
+            )
+
+            display_message(f"\n  정리 완료: {len(files_to_remove)}개 파일이 Work에서 제거되었습니다.", "INFO")
+            display_message("  제거된 파일은 Work Git 히스토리에 안전하게 보관되어 있습니다.", "INFO")
+
+        except Exception as e:
+            display_message(f"  Work 파일 정리 중 오류: {e}", "ERROR")
+            import traceback
+            display_message(f"  상세: {traceback.format_exc()}", "DEBUG")
+
     def _check_and_notify_sources_change(self, config_file):
-        """SOURCES 변경 여부 확인 및 사용자 안내
+        """프로젝트 설정 변경 후 Work 디렉토리 자동 정리
+
+        프로젝트 편집으로 SOURCES 패턴이 변경되어 일부 파일이 규칙에서 제외될 경우:
+        1. 제외된 파일을 Work Git에 백업 커밋
+        2. Work 디렉토리 및 Git에서 해당 파일 삭제
+        3. 삭제 커밋 생성
 
         Args:
             config_file: 수정된 프로젝트 설정 파일 경로
@@ -1567,32 +1692,45 @@ class ProjectManager:
         import configparser
 
         try:
-            # 수정된 설정 파일 읽기
+            # Work 디렉토리가 존재하지 않으면 정리 불필요
+            if not hasattr(self, 'working_dir') or not os.path.exists(self.working_dir):
+                display_message("Work 디렉토리가 없어 자동 정리를 건너뜁니다.", "DEBUG")
+                return
+
+            work_git_dir = os.path.join(self.working_dir, '.git')
+            if not os.path.exists(work_git_dir):
+                display_message("Work Git 저장소가 초기화되지 않아 자동 정리를 건너뜁니다.", "DEBUG")
+                return
+
+            # 수정된 설정 파일 읽고 새로운 config를 self에 적용
+            display_message("프로젝트 설정을 다시 로드합니다...", "DEBUG")
             new_config = configparser.ConfigParser()
             new_config.read(config_file, encoding='utf-8')
+            self.config = new_config
 
-            # SOURCES 섹션 존재 여부 확인
-            if new_config.has_section('SOURCES'):
-                display_message("=" * 60, "INFO")
-                display_message("[안내] SOURCES 패턴이 변경되었습니다", "INFO")
-                display_message("", "INFO")
-                display_message("다음 Download 실행 시:", "INFO")
-                display_message("  - 새로 추가된 파일: Production Git에 자동 추가", "INFO")
-                display_message("  - SOURCES에서 제외된 파일: Git 추적 중단 (파일은 유지)", "INFO")
-                display_message("", "INFO")
-                display_message("변경된 SOURCES 패턴:", "INFO")
+            # 새 SOURCES 패턴 표시
+            display_message("=" * 60, "INFO")
+            display_message("[안내] 프로젝트 설정이 변경되었습니다", "INFO")
+            display_message("", "INFO")
+            display_message("현재 SOURCES 패턴:", "INFO")
 
-                sources = []
-                for key in sorted(new_config.options('SOURCES')):
-                    value = new_config.get('SOURCES', key)
-                    sources.append(f"  {key}={value}")
-                    display_message(f"  {key}={value}", "INFO")
+            if hasattr(self, 'sources') and self.sources:
+                for idx, pattern in enumerate(self.sources):
+                    display_message(f"  {str(idx).zfill(2)}={pattern}", "INFO")
+            else:
+                display_message("  (SOURCES 패턴 없음)", "INFO")
 
-                display_message("=" * 60, "INFO")
+            display_message("=" * 60, "INFO")
+
+            # Work 디렉토리 자동 정리 실행
+            display_message("\n[자동 정리] Work 디렉토리에서 SOURCES 규칙 적용 중...", "INFO")
+            self._cleanup_work_files_outside_sources()
 
         except Exception as e:
             # 에러가 발생해도 프로젝트 편집은 성공으로 처리
             display_message(f"SOURCES 변경 확인 중 오류 (무시): {e}", "DEBUG")
+            import traceback
+            display_message(f"상세: {traceback.format_exc()}", "DEBUG")
 
     def _sync_gitignore_from_production(self, production_perm):
         """Production에서 Work로 .gitignore 동기화"""
@@ -2094,29 +2232,30 @@ class ProjectManager:
                 display_message("락 획득 완료", "INFO")
 
                 # Option B: SOURCES 패턴 변경 검증
-                saved_commit, saved_sources_hash = self.tag_manager.get_production_tag_parts()
-                if saved_sources_hash is not None:
-                    # Enhanced Tag 형식 (SOURCES hash 포함)
-                    current_sources_hash = self._compute_sources_hash()
-                    if saved_sources_hash != current_sources_hash:
-                        display_message("=" * 60, "WARNING")
-                        display_message("[경고] SOURCES 패턴이 변경되었습니다!", "WARNING")
-                        display_message(f"  이전 hash: {saved_sources_hash}", "WARNING")
-                        display_message(f"  현재 hash: {current_sources_hash}", "WARNING")
-                        display_message("  다운로드되는 파일 목록이 달라질 수 있습니다.", "WARNING")
-                        display_message("=" * 60, "WARNING")
-
-                        # 사용자 확인
-                        from ..utils.ui_handler import messagebox
-                        result = messagebox(
-                            "SOURCES 패턴이 변경되었습니다.\n계속 진행하시겠습니까?",
-                            "SOURCES 변경 감지",
-                            "warn",
-                            "yesno"
-                        )
-                        if result != "yes":
-                            display_message("사용자가 DOWNLOAD를 취소했습니다.", "INFO")
-                            return
+                # (주석 처리: 프로젝트 편집 시 자동 정리가 수행되므로 Download 시 경고 불필요)
+                # saved_commit, saved_sources_hash = self.tag_manager.get_production_tag_parts()
+                # if saved_sources_hash is not None:
+                #     # Enhanced Tag 형식 (SOURCES hash 포함)
+                #     current_sources_hash = self._compute_sources_hash()
+                #     if saved_sources_hash != current_sources_hash:
+                #         display_message("=" * 60, "WARNING")
+                #         display_message("[경고] SOURCES 패턴이 변경되었습니다!", "WARNING")
+                #         display_message(f"  이전 hash: {saved_sources_hash}", "WARNING")
+                #         display_message(f"  현재 hash: {current_sources_hash}", "WARNING")
+                #         display_message("  다운로드되는 파일 목록이 달라질 수 있습니다.", "WARNING")
+                #         display_message("=" * 60, "WARNING")
+                #
+                #         # 사용자 확인
+                #         from ..utils.ui_handler import messagebox
+                #         result = messagebox(
+                #             "SOURCES 패턴이 변경되었습니다.\n계속 진행하시겠습니까?",
+                #             "SOURCES 변경 감지",
+                #             "warn",
+                #             "yesno"
+                #         )
+                #         if result != "yes":
+                #             display_message("사용자가 DOWNLOAD를 취소했습니다.", "INFO")
+                #             return
 
                 # Production Git 초기화 (필요시)
                 if not GitHelper.is_git_repo(self.production_dir):
