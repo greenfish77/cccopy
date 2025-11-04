@@ -1526,9 +1526,9 @@ class ProjectManager:
             backup_count_str = self._get_config_value_without_comment('UPLOAD', 'BACKUP_COUNT')
             if backup_count_str:
                 return int(backup_count_str)
-            return 0  # 기본값: 백업 안함
+            return 1  # 기본값: 백업 1개 유지
         except (ValueError, TypeError):
-            return 0
+            return 1
 
     def _compute_sources_hash(self):
         """현재 프로젝트의 SOURCES 패턴들을 해시화
@@ -1811,7 +1811,8 @@ class ProjectManager:
         backup_dir_escaped = shlex.quote(backup_dir)
         backup_path_escaped = shlex.quote(backup_path)
 
-        cmd = f"[ -f {production_file_escaped} ] && mkdir -p {backup_dir_escaped} && cp -p {production_file_escaped} {backup_path_escaped} || true"
+        # 파일이 존재하면 백업, 없으면 skip (에러 코드 0 반환)
+        cmd = f"if [ -f {production_file_escaped} ]; then mkdir -p {backup_dir_escaped} && cp -p {production_file_escaped} {backup_path_escaped}; else echo 'File not found, backup skipped'; fi"
         return cmd
 
     def collect_files_from_git(self, include_work_only=False):
@@ -1999,27 +2000,8 @@ class ProjectManager:
                     status_output = GitHelper.run_git_command(['status', '--short'], cwd=self.production_dir, capture_output=True)
 
                     if status_output and status_output.strip():
-                        # 변경된 파일 목록 요약 출력
-                        changed_lines = [line for line in status_output.strip().split('\n') if line.strip()]
-                        display_message(f"Production에서 직접 수정된 파일: {len(changed_lines)}개", "INFO")
-                        # 처음 5개만 상세 표시
-                        for line in changed_lines[:5]:
-                            formatted_line = GitHelper.format_git_status_line(line)
-                            display_message(f"  {formatted_line}", "INFO")
-                        if len(changed_lines) > 5:
-                            display_message(f"  ... 외 {len(changed_lines) - 5}개 파일 (상세 로그는 DEBUG 레벨 참조)", "INFO")
-
-                        # DEBUG 레벨로 전체 목록 출력
-                        for line in changed_lines[5:]:
-                            formatted_line = GitHelper.format_git_status_line(line)
-                            display_message(f"  {formatted_line}", "DEBUG")
-
-                        display_message("Production 변경 사항 자동 커밋 중...", "INFO")
-
-                        # Option B: SOURCES 필터링 적용한 선택적 auto-commit
-                        display_message("  현재 프로젝트 SOURCES 패턴에 매칭되는 파일만 커밋합니다...", "INFO")
-
                         # 변경된 파일 중 SOURCES 패턴에 매칭되는 파일만 추출
+                        changed_lines = [line for line in status_output.strip().split('\n') if line.strip()]
                         changed_files_in_sources = []
                         source_patterns = self.get_source_patterns()
                         display_message(f"  SOURCES 패턴: {source_patterns}", "DEBUG")
@@ -2039,18 +2021,32 @@ class ProjectManager:
                             for pattern in source_patterns:
                                 # glob 패턴 매칭
                                 if fnmatch.fnmatch(rel_path, pattern):
-                                    changed_files_in_sources.append(rel_path)
+                                    changed_files_in_sources.append((line, rel_path))
                                     break
                                 # 디렉토리 패턴 (AAA/**)
                                 elif pattern.endswith('**'):
                                     dir_prefix = pattern.rstrip('*').rstrip('/')
                                     if rel_path.startswith(dir_prefix + '/') or rel_path == dir_prefix:
-                                        changed_files_in_sources.append(rel_path)
+                                        changed_files_in_sources.append((line, rel_path))
                                         break
 
+                        # SOURCES에 속한 변경된 파일만 로깅
                         if changed_files_in_sources:
-                            display_message(f"  SOURCES에 속한 변경 파일 {len(changed_files_in_sources)}개를 커밋합니다", "INFO")
-                            GitHelper.add_files(self.production_dir, changed_files_in_sources, production_perm=production_perm)
+                            display_message(f"Production에서 직접 수정된 파일 (SOURCES 패턴 매칭): {len(changed_files_in_sources)}개", "INFO")
+                            # 처음 5개만 상세 표시
+                            for line, rel_path in changed_files_in_sources[:5]:
+                                formatted_line = GitHelper.format_git_status_line(line)
+                                display_message(f"  {formatted_line}", "INFO")
+                            if len(changed_files_in_sources) > 5:
+                                display_message(f"  ... 외 {len(changed_files_in_sources) - 5}개 파일", "INFO")
+
+                            display_message("Production 변경 사항 자동 커밋 중...", "INFO")
+                            display_message("  현재 프로젝트 SOURCES 패턴에 매칭되는 파일만 커밋합니다...", "INFO")
+
+                            # SOURCES에 속한 파일만 커밋
+                            rel_paths_only = [rel_path for _, rel_path in changed_files_in_sources]
+                            display_message(f"  SOURCES에 속한 변경 파일 {len(rel_paths_only)}개를 커밋합니다", "INFO")
+                            GitHelper.add_files(self.production_dir, rel_paths_only, production_perm=production_perm)
                             GitHelper.commit_all(self.production_dir, "Auto-commit: Direct changes in production", production_perm=production_perm)
                             display_message("Production 직접 수정 내용 자동 커밋 완료", "INFO")
                         else:
@@ -2177,55 +2173,53 @@ class ProjectManager:
                     status_output = GitHelper.run_git_command(['status', '--short'], cwd=self.production_dir, capture_output=True)
 
                     if status_output and status_output.strip():
-                        # 변경된 파일 목록 요약 출력
-                        changed_lines = [line for line in status_output.strip().split('\n') if line.strip()]
-                        display_message(f"Production에서 직접 수정된 파일: {len(changed_lines)}개", "INFO")
-                        # 처음 5개만 상세 표시
-                        for line in changed_lines[:5]:
-                            formatted_line = GitHelper.format_git_status_line(line)
-                            display_message(f"  {formatted_line}", "INFO")
-                        if len(changed_lines) > 5:
-                            display_message(f"  ... 외 {len(changed_lines) - 5}개 파일 (상세 로그는 DEBUG 레벨 참조)", "INFO")
-
-                        # DEBUG 레벨로 전체 목록 출력
-                        for line in changed_lines[5:]:
-                            formatted_line = GitHelper.format_git_status_line(line)
-                            display_message(f"  {formatted_line}", "DEBUG")
-
-                        display_message("Production 변경 사항 자동 커밋 중...", "INFO")
-
-                        # Option B: SOURCES 필터링 적용한 선택적 auto-commit
-                        # Production에서 직접 수정되었지만, 현재 프로젝트의 SOURCES에 속하는 파일만 커밋
-                        display_message("  현재 프로젝트 SOURCES 패턴에 매칭되는 파일만 커밋합니다...", "INFO")
-
                         # 변경된 파일 중 SOURCES 패턴에 매칭되는 파일만 추출
+                        changed_lines = [line for line in status_output.strip().split('\n') if line.strip()]
                         changed_files_in_sources = []
                         source_patterns = self.get_source_patterns()
+                        display_message(f"  SOURCES 패턴: {source_patterns}", "DEBUG")
                         import fnmatch
 
-                        for line in status_output.strip().split('\n'):
-                            if line.strip():
-                                # git status --short 형식: "XY filename"
-                                rel_path = line[3:].strip()  # 상태 코드 제거
+                        for line in changed_lines:
+                            # git status --short 형식: "XY filename" 또는 "X filename" (Git 1.8)
+                            # Git 1.8.3: "M AAA/nnn.txt" (1글자 + 공백)
+                            # Git 2.x+: " M AAA/nnn.txt" (2글자)
+                            # 공백 이후가 파일명
+                            parts = line.split(None, 1)  # 첫 공백으로 분리
+                            if len(parts) < 2:
+                                continue
+                            rel_path = parts[1].strip()
 
-                                # SOURCES 패턴 매칭 확인
-                                for pattern in source_patterns:
-                                    # glob 패턴 매칭
-                                    if fnmatch.fnmatch(rel_path, pattern):
-                                        changed_files_in_sources.append(rel_path)
+                            # SOURCES 패턴 매칭 확인
+                            for pattern in source_patterns:
+                                # glob 패턴 매칭
+                                if fnmatch.fnmatch(rel_path, pattern):
+                                    changed_files_in_sources.append((line, rel_path))
+                                    break
+                                # 디렉토리 패턴 (AAA/**)
+                                elif pattern.endswith('**'):
+                                    dir_prefix = pattern.rstrip('*').rstrip('/')
+                                    if rel_path.startswith(dir_prefix + '/') or rel_path == dir_prefix:
+                                        changed_files_in_sources.append((line, rel_path))
                                         break
-                                    # 디렉토리 패턴 (AAA/**)
-                                    elif pattern.endswith('**'):
-                                        dir_prefix = pattern.rstrip('*').rstrip('/')
-                                        if rel_path.startswith(dir_prefix + '/') or rel_path == dir_prefix:
-                                            changed_files_in_sources.append(rel_path)
-                                            break
 
+                        # SOURCES에 속한 변경된 파일만 로깅
                         if changed_files_in_sources:
-                            display_message(f"  SOURCES에 속한 변경 파일 {len(changed_files_in_sources)}개를 커밋합니다", "INFO")
-                            for f in changed_files_in_sources[:5]:  # 최대 5개만 표시
-                                display_message(f"    - {f}", "DEBUG")
-                            GitHelper.add_files(self.production_dir, changed_files_in_sources, production_perm=production_perm)
+                            display_message(f"Production에서 직접 수정된 파일 (SOURCES 패턴 매칭): {len(changed_files_in_sources)}개", "INFO")
+                            # 처음 5개만 상세 표시
+                            for line, rel_path in changed_files_in_sources[:5]:
+                                formatted_line = GitHelper.format_git_status_line(line)
+                                display_message(f"  {formatted_line}", "INFO")
+                            if len(changed_files_in_sources) > 5:
+                                display_message(f"  ... 외 {len(changed_files_in_sources) - 5}개 파일", "INFO")
+
+                            display_message("Production 변경 사항 자동 커밋 중...", "INFO")
+                            display_message("  현재 프로젝트 SOURCES 패턴에 매칭되는 파일만 커밋합니다...", "INFO")
+
+                            # SOURCES에 속한 파일만 커밋
+                            rel_paths_only = [rel_path for _, rel_path in changed_files_in_sources]
+                            display_message(f"  SOURCES에 속한 변경 파일 {len(rel_paths_only)}개를 커밋합니다", "INFO")
+                            GitHelper.add_files(self.production_dir, rel_paths_only, production_perm=production_perm)
                             GitHelper.commit_all(self.production_dir, "Auto-commit: Direct changes in production", production_perm=production_perm)
                             display_message("Production 직접 수정 내용 자동 커밋 완료", "INFO")
                         else:
@@ -2413,27 +2407,8 @@ class ProjectManager:
                     status_output = GitHelper.run_git_command(['status', '--short'], cwd=self.production_dir, capture_output=True)
 
                     if status_output and status_output.strip():
-                        # 변경된 파일 목록 요약 출력
-                        changed_lines = [line for line in status_output.strip().split('\n') if line.strip()]
-                        display_message(f"Production에서 직접 수정된 파일: {len(changed_lines)}개", "INFO")
-                        # 처음 5개만 상세 표시
-                        for line in changed_lines[:5]:
-                            formatted_line = GitHelper.format_git_status_line(line)
-                            display_message(f"  {formatted_line}", "INFO")
-                        if len(changed_lines) > 5:
-                            display_message(f"  ... 외 {len(changed_lines) - 5}개 파일 (상세 로그는 DEBUG 레벨 참조)", "INFO")
-
-                        # DEBUG 레벨로 전체 목록 출력
-                        for line in changed_lines[5:]:
-                            formatted_line = GitHelper.format_git_status_line(line)
-                            display_message(f"  {formatted_line}", "DEBUG")
-
-                        display_message("Production 변경 사항 자동 커밋 중...", "INFO")
-
-                        # Option B: SOURCES 필터링 적용한 선택적 auto-commit
-                        display_message("  현재 프로젝트 SOURCES 패턴에 매칭되는 파일만 커밋합니다...", "INFO")
-
                         # 변경된 파일 중 SOURCES 패턴에 매칭되는 파일만 추출
+                        changed_lines = [line for line in status_output.strip().split('\n') if line.strip()]
                         changed_files_in_sources = []
                         source_patterns = self.get_source_patterns()
                         display_message(f"  SOURCES 패턴: {source_patterns}", "DEBUG")
@@ -2453,18 +2428,32 @@ class ProjectManager:
                             for pattern in source_patterns:
                                 # glob 패턴 매칭
                                 if fnmatch.fnmatch(rel_path, pattern):
-                                    changed_files_in_sources.append(rel_path)
+                                    changed_files_in_sources.append((line, rel_path))
                                     break
                                 # 디렉토리 패턴 (AAA/**)
                                 elif pattern.endswith('**'):
                                     dir_prefix = pattern.rstrip('*').rstrip('/')
                                     if rel_path.startswith(dir_prefix + '/') or rel_path == dir_prefix:
-                                        changed_files_in_sources.append(rel_path)
+                                        changed_files_in_sources.append((line, rel_path))
                                         break
 
+                        # SOURCES에 속한 변경된 파일만 로깅
                         if changed_files_in_sources:
-                            display_message(f"  SOURCES에 속한 변경 파일 {len(changed_files_in_sources)}개를 커밋합니다", "INFO")
-                            GitHelper.add_files(self.production_dir, changed_files_in_sources, production_perm=production_perm)
+                            display_message(f"Production에서 직접 수정된 파일 (SOURCES 패턴 매칭): {len(changed_files_in_sources)}개", "INFO")
+                            # 처음 5개만 상세 표시
+                            for line, rel_path in changed_files_in_sources[:5]:
+                                formatted_line = GitHelper.format_git_status_line(line)
+                                display_message(f"  {formatted_line}", "INFO")
+                            if len(changed_files_in_sources) > 5:
+                                display_message(f"  ... 외 {len(changed_files_in_sources) - 5}개 파일", "INFO")
+
+                            display_message("Production 변경 사항 자동 커밋 중...", "INFO")
+                            display_message("  현재 프로젝트 SOURCES 패턴에 매칭되는 파일만 커밋합니다...", "INFO")
+
+                            # SOURCES에 속한 파일만 커밋
+                            rel_paths_only = [rel_path for _, rel_path in changed_files_in_sources]
+                            display_message(f"  SOURCES에 속한 변경 파일 {len(rel_paths_only)}개를 커밋합니다", "INFO")
+                            GitHelper.add_files(self.production_dir, rel_paths_only, production_perm=production_perm)
                             GitHelper.commit_all(self.production_dir, "Auto-commit: Direct changes in production", production_perm=production_perm)
                             display_message("Production 직접 수정 내용 자동 커밋 완료", "INFO")
                         else:
@@ -2526,15 +2515,24 @@ class ProjectManager:
                 # 파일 업로드 (sg를 통한 실행)
                 display_message("파일 업로드 중...", "INFO")
                 uploaded_count = 0
+                backup_count = 0
                 for production_file, work_file, rel_path in modified_files:
-                    # 백업 생성 (sg 사용)
-                    production_file_escaped = shlex.quote(production_file)
+                    # 백업 생성 (파일이 존재하는 경우만)
                     backup_cmd = self._create_backup_command(production_file)
                     if backup_cmd:
-                        production_perm.execute_sg_command(backup_cmd, timeout=10, check=False, operation_desc=f"파일 백업 ({os.path.basename(production_file)})")
+                        try:
+                            result = production_perm.execute_sg_command(backup_cmd, timeout=10, check=True, operation_desc=f"파일 백업 ({os.path.basename(production_file)})")
+                            # 백업 성공시 카운트 증가
+                            if result and 'skipped' not in result.lower():
+                                backup_count += 1
+                                display_message(f"  백업 완료: {rel_path}", "DEBUG")
+                        except Exception as e:
+                            # 백업 실패는 경고만 출력하고 업로드는 계속 진행
+                            display_message(f"  [경고] 백업 실패 (업로드는 계속): {rel_path} - {str(e)}", "WARN")
 
                     # 디렉토리 생성 및 파일 복사 (sg 사용)
                     work_file_escaped = shlex.quote(work_file)
+                    production_file_escaped = shlex.quote(production_file)
                     dir_name = shlex.quote(os.path.dirname(production_file))
                     cmd = f"mkdir -p {dir_name} && cp -p {work_file_escaped} {production_file_escaped}"
                     production_perm.execute_sg_command(cmd, timeout=30, operation_desc=f"Production 파일 복사 ({rel_path})")
@@ -2542,7 +2540,7 @@ class ProjectManager:
                     display_message(f"  업로드: {rel_path}", "INFO")
                     uploaded_count += 1
 
-                display_message(f"{uploaded_count}개 파일 업로드 완료", "INFO")
+                display_message(f"{uploaded_count}개 파일 업로드 완료 (백업: {backup_count}개)", "INFO")
 
                 # Option B: Production에서 선택적 커밋 (SOURCES 필터링 적용)
                 # 업로드된 파일들의 상대 경로만 git add
