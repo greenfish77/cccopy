@@ -40,7 +40,7 @@ CCCOPY_VERSION       = f'{CCCOPY_VERSION_MAJOR}.{CCCOPY_VERSION_MINOR}'
 # 로그 관련 상수
 # LOG_DIR은 tui.py에 정의되어 있음 (고정 경로이므로 중복 불필요)
 MAX_LOG_LINES = 1024          # 로그 파일당 최대 라인 수 (초과시 새 파일 생성)
-MAX_LOG_FILES = 1024          # 최대 보관 로그 파일 개수 (오래된 것 자동 삭제)
+MAX_LOG_FILES =  256          # 최대 보관 로그 파일 개수 (오래된 것 자동 삭제)
 
 # 캐시 타임아웃 상수 (초 단위)
 PARTIAL_REFRESH_CACHE_TIMEOUT = 300  # 5분
