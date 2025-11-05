@@ -83,6 +83,12 @@ class ViewMode(Enum):
     PRODUCTION = "PRODUCTION"
 
 
+class ViewStyle(Enum):
+    """뷰 스타일"""
+    DETAIL = "detail"  # 기존 상세 모드 (디렉토리 탐색)
+    TREE = "tree"      # 트리 뷰 모드 (모든 파일 표시)
+
+
 class FileNode:
     """파일/디렉토리 노드"""
     def __init__(self, name: str, path: str, is_dir: bool = False,
@@ -251,9 +257,15 @@ class CCCopyTUI:
         self.current_log_file_path = None
         self._init_log_file()
 
+        # 뷰 스타일 (detail 또는 tree)
+        self.view_style = ViewStyle.DETAIL  # 기본값: detail
+
         # 디렉토리 탐색 상태
         self.current_directory = ""  # 상대 경로 (공백은 루트)
         self.directory_entries: List[Dict] = []  # 현재 디렉토리의 항목들
+
+        # 트리 뷰 상태
+        self.tree_expanded_dirs = set()  # 펼쳐진 디렉토리 경로 집합
 
         # 로그 뷰어 상태
         self.log_viewer_mode = False
@@ -712,7 +724,8 @@ class CCCopyTUI:
             for file_path, new_state in self.pending_updates.items():
                 # directory_entries에서 해당 파일 찾아서 상태 업데이트
                 for entry in self.directory_entries:
-                    if entry.get('type') == 'file' and entry.get('path') == file_path:
+                    # Detail 모드의 'file'과 Tree 모드의 'tree_file' 모두 처리
+                    if entry.get('type') in ('file', 'tree_file') and entry.get('path') == file_path:
                         entry['state'] = new_state
                         updated = True
 
@@ -2100,6 +2113,225 @@ class CCCopyTUI:
             self.add_log(f"Directory view build failed: {e}", "ERROR")
             self.directory_entries = []
 
+    def build_tree_view(self):
+        """트리 뷰 모드를 위한 항목 목록 구성 (모든 파일과 디렉토리 표시)"""
+        try:
+            # 기본 디렉토리 설정
+            if self.mode == ViewMode.WORK:
+                base_dir = self.workspace.working_dir
+            else:
+                base_dir = self.workspace.production_dir
+
+            # 재귀적으로 모든 파일과 디렉토리 탐색
+            self.directory_entries = []
+            self._build_tree_recursive(base_dir, "", 0)
+
+            # 선택 인덱스 조정
+            if self.selected_index >= len(self.directory_entries):
+                self.selected_index = max(0, len(self.directory_entries) - 1)
+
+            self.add_log(f"Tree view: {len(self.directory_entries)} items", "DEBUG")
+
+        except Exception as e:
+            self.add_log(f"Tree view build failed: {e}", "ERROR")
+            self.directory_entries = []
+
+    def _build_tree_recursive(self, base_dir: str, rel_path: str, depth: int):
+        """재귀적으로 트리 항목 구성
+
+        Args:
+            base_dir: 기본 디렉토리 (절대 경로)
+            rel_path: 상대 경로
+            depth: 현재 깊이 (들여쓰기 레벨)
+        """
+        import fnmatch
+
+        current_full_path = os.path.join(base_dir, rel_path) if rel_path else base_dir
+
+        # 디렉토리가 아니면 종료
+        if not os.path.isdir(current_full_path):
+            return
+
+        try:
+            # 현재 디렉토리의 항목들 가져오기
+            items = os.listdir(current_full_path)
+
+            # Exclude 패턴 가져오기
+            exclude_patterns = self.workspace.get_exclude_patterns()
+            source_patterns = self.workspace.get_source_patterns()
+
+            # 디렉토리와 파일 분류
+            directories = []
+            files = []
+
+            for item in items:
+                # .git, .cccopy 제외
+                if item in ['.git', '.cccopy']:
+                    continue
+
+                item_path = os.path.join(current_full_path, item)
+                if os.path.isdir(item_path):
+                    directories.append(item)
+                else:
+                    files.append(item)
+
+            # EXCLUDES 패턴으로 디렉토리 필터링
+            filtered_dirs = []
+            for dir_name in directories:
+                # 현재 경로 기준 상대 경로
+                if rel_path:
+                    dir_rel_path = os.path.join(rel_path, dir_name)
+                else:
+                    dir_rel_path = dir_name
+
+                # EXCLUDES 패턴 체크
+                exclude = False
+                for exclude_pattern in exclude_patterns:
+                    # 디렉토리 패턴 매칭
+                    if fnmatch.fnmatch(dir_rel_path, exclude_pattern.rstrip('/')):
+                        exclude = True
+                        break
+                    # 디렉토리 이름만으로도 체크
+                    if fnmatch.fnmatch(dir_name, exclude_pattern.rstrip('/')):
+                        exclude = True
+                        break
+                    # **/ 패턴 처리
+                    if exclude_pattern.startswith('**/'):
+                        pattern_tail = exclude_pattern[3:].rstrip('/')
+                        if fnmatch.fnmatch(dir_name, pattern_tail):
+                            exclude = True
+                            break
+
+                if not exclude:
+                    filtered_dirs.append(dir_name)
+
+            directories = filtered_dirs
+
+            # SOURCES 패턴으로 디렉토리 필터링 (루트 디렉토리일 때만)
+            if not rel_path:  # 루트 디렉토리인 경우
+                valid_dirs = set()
+                for pattern in source_patterns:
+                    # 패턴에서 첫 번째 디렉토리 추출
+                    # 예: "AAA/**" -> "AAA", "BBB/*" -> "BBB"
+                    parts = pattern.split('/')
+                    if parts and parts[0] and not parts[0].startswith('*'):
+                        valid_dirs.add(parts[0])
+
+                # SOURCES에 정의된 디렉토리만 표시
+                directories = [d for d in directories if d in valid_dirs]
+
+            # EXCLUDES 패턴으로 파일 필터링
+            filtered_files = []
+            for file_name in files:
+                # 현재 경로 기준 상대 경로
+                if rel_path:
+                    file_rel_path = os.path.join(rel_path, file_name)
+                else:
+                    file_rel_path = file_name
+
+                # EXCLUDES 패턴 체크
+                exclude = False
+                for exclude_pattern in exclude_patterns:
+                    # 파일 패턴 매칭
+                    if fnmatch.fnmatch(file_rel_path, exclude_pattern):
+                        exclude = True
+                        break
+                    # 파일 이름만으로도 체크
+                    if fnmatch.fnmatch(file_name, exclude_pattern):
+                        exclude = True
+                        break
+                    # **/ 패턴 처리
+                    if exclude_pattern.startswith('**/'):
+                        pattern_tail = exclude_pattern[3:]
+                        if fnmatch.fnmatch(file_name, pattern_tail):
+                            exclude = True
+                            break
+
+                if not exclude:
+                    filtered_files.append(file_name)
+
+            files = filtered_files
+
+            # SOURCES 패턴으로 파일 필터링 (depth=0일 때만)
+            if depth == 0:
+                sources_filtered_files = []
+                for file_name in files:
+                    file_rel_path = file_name  # depth=0이므로 루트
+
+                    # SOURCES 패턴 체크
+                    match = False
+                    for pattern in source_patterns:
+                        if fnmatch.fnmatch(file_rel_path, pattern):
+                            match = True
+                            break
+                        # **/ 패턴 처리
+                        if pattern.startswith('**/'):
+                            pattern_tail = pattern[3:]
+                            if fnmatch.fnmatch(file_name, pattern_tail):
+                                match = True
+                                break
+
+                    if match:
+                        sources_filtered_files.append(file_name)
+
+                files = sources_filtered_files
+
+            # 정렬
+            directories.sort()
+            files.sort()
+
+            # 디렉토리 먼저 추가
+            for dir_name in directories:
+                dir_rel_path = os.path.join(rel_path, dir_name) if rel_path else dir_name
+                is_expanded = dir_rel_path in self.tree_expanded_dirs
+
+                # 디렉토리 항목 추가
+                self.directory_entries.append({
+                    'type': 'tree_directory',
+                    'name': dir_name,
+                    'path': dir_rel_path,
+                    'depth': depth,
+                    'expanded': is_expanded
+                })
+
+                # 펼쳐져 있으면 하위 항목도 추가
+                if is_expanded:
+                    self._build_tree_recursive(base_dir, dir_rel_path, depth + 1)
+
+            # 파일들 추가 (항상 현재 레벨의 파일 표시)
+            for file_name in files:
+                file_rel_path = os.path.join(rel_path, file_name) if rel_path else file_name
+                full_path = os.path.join(base_dir, file_rel_path)
+
+                try:
+                    size = os.path.getsize(full_path) if os.path.exists(full_path) else 0
+                    current_mtime = os.path.getmtime(full_path) if os.path.exists(full_path) else 0
+
+                    # Cache에서 상태 조회
+                    cached_state = self.get_cached_state(file_rel_path, current_mtime)
+                    if cached_state is not None:
+                        state = cached_state
+                    else:
+                        state = FileState.PENDING
+                        self.request_state_check(file_rel_path, full_path)
+                except Exception:
+                    size = 0
+                    state = FileState.SAME
+
+                self.directory_entries.append({
+                    'type': 'tree_file',
+                    'name': file_name,
+                    'path': file_rel_path,
+                    'depth': depth,
+                    'size': size,
+                    'state': state
+                })
+
+        except PermissionError:
+            self.add_log(f"Permission denied: {current_full_path}", "WARNING")
+        except Exception as e:
+            self.add_log(f"Error reading directory {current_full_path}: {e}", "ERROR")
+
     def get_parent_directory(self, path: str) -> str:
         """상위 디렉토리 경로 반환"""
         if not path:
@@ -2116,11 +2348,14 @@ class CCCopyTUI:
         # TAG 정보 가져오기
         current_tag = self.get_current_project_tag()
 
+        # 뷰 스타일 정보 추가
+        view_style_text = self.view_style.value  # "detail" 또는 "tree"
+
         # TAG가 있으면 모드 다음에 추가, 없으면 기존과 동일
         if current_tag:
-            header_text = f"CCCopy v{CCCOPY_VERSION} | [M]ode: {self.mode.value} | {current_tag}"
+            header_text = f"CCCopy v{CCCOPY_VERSION} | [M]ode: {self.mode.value} | View: {view_style_text} | {current_tag}"
         else:
-            header_text = f"CCCopy v{CCCOPY_VERSION} | [M]ode: {self.mode.value}"
+            header_text = f"CCCopy v{CCCOPY_VERSION} | [M]ode: {self.mode.value} | View: {view_style_text}"
 
         # 헤더 그리기 (Unicode 박스 문자 사용)
         try:
@@ -2148,13 +2383,18 @@ class CCCopyTUI:
             base_path = self.workspace.production_dir
 
         # 현재 디렉토리 경로 구성
-        if self.current_directory:
-            current_path = f"{base_path}/{self.current_directory}"
-        else:
+        if self.view_style == ViewStyle.TREE:
+            # 트리 뷰 모드에서는 전체 경로만 표시
             current_path = base_path
+        else:
+            # Detail 모드에서는 현재 디렉토리 경로 표시
+            if self.current_directory:
+                current_path = f"{base_path}/{self.current_directory}"
+            else:
+                current_path = base_path
 
-        # [T]erminal 메뉴 추가 (구분자 | 포함)
-        path_text = f"{current_path} | [T]erminal"
+        # [T]erminal | [V]iew 메뉴 추가
+        path_text = f"{current_path} | [T]erminal | [V]iew"
         available_width = width - 5
         if len(path_text) > available_width:
             path_text = path_text[:available_width-3] + "..."
@@ -2194,27 +2434,51 @@ class CCCopyTUI:
                 if entry_index < len(self.directory_entries):
                     entry = self.directory_entries[entry_index]
 
+                    # 트리 뷰 모드인지 확인
+                    is_tree_mode = (self.view_style == ViewStyle.TREE)
+
                     # 항목 타입별 표시
                     if entry['type'] == 'parent':
                         name_text = ".."
                         suffix_text = ""
                         color = getattr(self, 'colors', {}).get('folder', curses.A_BOLD)
+                        indent = ""
                     elif entry['type'] == 'directory':
                         name_text = entry['name']
                         suffix_text = ""
                         color = getattr(self, 'colors', {}).get('folder', curses.A_BOLD)
-                    else:  # file
+                        indent = ""
+                    elif entry['type'] == 'tree_directory':
+                        # 트리 뷰 디렉토리
+                        depth = entry.get('depth', 0)
+                        is_expanded = entry.get('expanded', False)
+                        expand_symbol = "- " if is_expanded else "+ "
+                        indent = "  " * depth  # 2칸 들여쓰기
+                        name_text = expand_symbol + entry['name']
+                        suffix_text = ""
+                        color = getattr(self, 'colors', {}).get('folder', curses.A_BOLD)
+                    elif entry['type'] == 'tree_file':
+                        # 트리 뷰 파일
+                        depth = entry.get('depth', 0)
+                        indent = "  " * depth  # 2칸 들여쓰기
                         state_symbol = self.get_state_symbol(entry['state'])
                         size_text = self.format_size(entry['size'])
                         name_text = entry['name']
                         suffix_text = f"{size_text:>6} [{state_symbol}]"
                         color = self.get_state_color(entry['state'])
+                    else:  # file (detail mode)
+                        state_symbol = self.get_state_symbol(entry['state'])
+                        size_text = self.format_size(entry['size'])
+                        name_text = entry['name']
+                        suffix_text = f"{size_text:>6} [{state_symbol}]"
+                        color = self.get_state_color(entry['state'])
+                        indent = ""
 
-                    # 가용 너비 계산 (│ > name ... suffix [S] │)
-                    # 1(│) + 1(>/' ') + name + suffix + 1(│) = width
+                    # 가용 너비 계산 (│ > indent name ... suffix [S] │)
                     available_width = width - 4  # 양쪽 │과 선택 표시(> or ' ') 제외
+                    indent_width = self.get_display_width(indent)
                     suffix_width = self.get_display_width(suffix_text)
-                    max_name_width = available_width - suffix_width
+                    max_name_width = available_width - indent_width - suffix_width
 
                     # 파일명이 너무 길면 잘라내기 (한글 폭 고려)
                     name_display_width = self.get_display_width(name_text)
@@ -2225,16 +2489,18 @@ class CCCopyTUI:
                     if entry_index == self.selected_index:
                         selected_color = getattr(self, 'colors', {}).get('selected', curses.A_REVERSE)
                         stdscr.addstr(row, 1, ">")
-                        # 파일명 출력
-                        self.safe_addstr(stdscr, row, 3, name_text, selected_color)
+                        # 들여쓰기 + 파일명 출력
+                        full_text = indent + name_text
+                        self.safe_addstr(stdscr, row, 3, full_text, selected_color)
                         # 크기와 상태를 오른쪽 끝에 출력 (한글 폭 고려)
                         if suffix_text:
                             suffix_col = width - 1 - self.get_display_width(suffix_text) - 1
                             self.safe_addstr(stdscr, row, suffix_col, suffix_text, selected_color)
                     else:
                         stdscr.addstr(row, 1, " ")  # 선택 표시 자리에 공백
-                        # 파일명 출력
-                        self.safe_addstr(stdscr, row, 3, name_text, color)
+                        # 들여쓰기 + 파일명 출력
+                        full_text = indent + name_text
+                        self.safe_addstr(stdscr, row, 3, full_text, color)
                         # 크기와 상태를 오른쪽 끝에 출력 (한글 폭 고려)
                         if suffix_text:
                             suffix_col = width - 1 - self.get_display_width(suffix_text) - 1
@@ -2644,16 +2910,21 @@ class CCCopyTUI:
             except Exception as e:
                 self.add_log(f"Production 자동 커밋 실패: {e}", "WARNING")
 
-            if full_refresh:
-                self.add_log("전체 파일 목록 새로고침 중...", "INFO")
-                # Full Refresh: thread 종료, cache clear, 동기 처리
-                # tree.build_tree()는 너무 느림 - directory_view만 사용
-                self.build_directory_view_full()
+            # 뷰 스타일에 따라 다른 메서드 호출
+            if self.view_style == ViewStyle.TREE:
+                # 트리 뷰 모드
+                self.add_log("트리 뷰 새로고침 중...", "INFO")
+                self.build_tree_view()
             else:
-                self.add_log("파일 목록 새로고침 중...", "INFO")
-                # Partial Refresh: thread 사용, cache 활용
-                # tree는 사용하지 않음 - 즉시 반환
-                self.build_directory_view()
+                # Detail 모드
+                if full_refresh:
+                    self.add_log("전체 파일 목록 새로고침 중...", "INFO")
+                    # Full Refresh: thread 종료, cache clear, 동기 처리
+                    self.build_directory_view_full()
+                else:
+                    self.add_log("파일 목록 새로고침 중...", "INFO")
+                    # Partial Refresh: thread 사용, cache 활용
+                    self.build_directory_view()
 
             self.selected_index = 0
             self.scroll_offset = 0
@@ -2722,7 +2993,11 @@ class CCCopyTUI:
                 # Watch 디렉토리 변경 알림
                 self.notify_directory_changed()
 
-            elif entry['type'] == 'file':
+            elif entry['type'] == 'tree_directory':
+                # 트리 뷰에서 디렉토리 토글 (expand/collapse)
+                self.handle_tree_toggle()
+
+            elif entry['type'] == 'file' or entry['type'] == 'tree_file':
                 # 파일 상세 정보 표시
                 self.add_log(f"File: {entry['path']}", "INFO")
                 # PENDING 상태는 (Pending)으로 표시, 나머지는 심볼로 표시
@@ -2730,6 +3005,96 @@ class CCCopyTUI:
                 self.add_log(f"State: {state_display}, Size: {self.format_size(entry['size'])}", "INFO")
         else:
             self.add_log(f"Invalid selection: index {self.selected_index} out of range", "ERROR")
+
+    def toggle_view_style(self):
+        """뷰 스타일 토글 (detail ⟷ tree)"""
+        if self.view_style == ViewStyle.DETAIL:
+            self.view_style = ViewStyle.TREE
+            self.add_log("트리 뷰 모드로 전환", "INFO")
+        else:
+            self.view_style = ViewStyle.DETAIL
+            self.add_log("상세 뷰 모드로 전환", "INFO")
+
+        # 뷰 재구성
+        self.refresh_tree()
+
+    def handle_tree_toggle(self):
+        """트리 뷰에서 디렉토리 expand/collapse 토글"""
+        if 0 <= self.selected_index < len(self.directory_entries):
+            entry = self.directory_entries[self.selected_index]
+
+            if entry['type'] == 'tree_directory':
+                dir_path = entry['path']
+                if dir_path in self.tree_expanded_dirs:
+                    # Collapse
+                    self.tree_expanded_dirs.remove(dir_path)
+                    self.add_log(f"디렉토리 접기: {dir_path}", "DEBUG")
+                else:
+                    # Expand
+                    self.tree_expanded_dirs.add(dir_path)
+                    self.add_log(f"디렉토리 펼치기: {dir_path}", "DEBUG")
+
+                # 트리 뷰 재구성
+                self.build_tree_view()
+                self.needs_redraw = True
+
+    def handle_tree_collapse(self):
+        """트리 뷰에서 선택된 항목에 대한 LEFT 키 처리
+
+        - 디렉토리 (expanded) -> Collapse
+        - 디렉토리 (collapsed) -> 한 칸 위로 이동
+        - 파일 -> 한 칸 위로 이동
+        """
+        if 0 <= self.selected_index < len(self.directory_entries):
+            entry = self.directory_entries[self.selected_index]
+
+            if entry['type'] == 'tree_directory':
+                dir_path = entry['path']
+                if dir_path in self.tree_expanded_dirs:
+                    # Expanded 상태 -> Collapse
+                    self.tree_expanded_dirs.remove(dir_path)
+                    self.add_log(f"디렉토리 접기: {dir_path}", "DEBUG")
+                    self.build_tree_view()
+                    self.needs_redraw = True
+                else:
+                    # 이미 Collapsed 상태 -> 한 칸 위로 이동
+                    if self.selected_index > 0:
+                        self.selected_index -= 1
+                        self.add_log(f"위로 이동", "DEBUG")
+            elif entry['type'] == 'tree_file':
+                # 파일 항목 -> 한 칸 위로 이동
+                if self.selected_index > 0:
+                    self.selected_index -= 1
+                    self.add_log(f"위로 이동", "DEBUG")
+
+    def handle_tree_expand(self):
+        """트리 뷰에서 선택된 항목에 대한 RIGHT 키 처리
+
+        - 디렉토리 (collapsed) -> Expand
+        - 디렉토리 (expanded) -> 한 칸 아래로 이동
+        - 파일 -> 한 칸 아래로 이동
+        """
+        if 0 <= self.selected_index < len(self.directory_entries):
+            entry = self.directory_entries[self.selected_index]
+
+            if entry['type'] == 'tree_directory':
+                dir_path = entry['path']
+                if dir_path not in self.tree_expanded_dirs:
+                    # Collapsed 상태 -> Expand
+                    self.tree_expanded_dirs.add(dir_path)
+                    self.add_log(f"디렉토리 펼치기: {dir_path}", "DEBUG")
+                    self.build_tree_view()
+                    self.needs_redraw = True
+                else:
+                    # 이미 Expanded 상태 -> 한 칸 아래로 이동
+                    if self.selected_index < len(self.directory_entries) - 1:
+                        self.selected_index += 1
+                        self.add_log(f"아래로 이동", "DEBUG")
+            elif entry['type'] == 'tree_file':
+                # 파일 항목 -> 한 칸 아래로 이동
+                if self.selected_index < len(self.directory_entries) - 1:
+                    self.selected_index += 1
+                    self.add_log(f"아래로 이동", "DEBUG")
 
     def toggle_log_viewer(self):
         """로그 뷰어 모드 토글"""
@@ -2838,13 +3203,16 @@ class CCCopyTUI:
             "=== 기본 조작 ===",
             "↑↓ 방향키     : 파일 선택 이동",
             "Space         : 폴더 펼치기/접기",
-            "Enter         : 파일 상세 정보 / 작업 실행",
+            "Enter         : 파일 상세 정보 / 작업 실행 / 트리 토글",
+            "← 방향키      : (트리 뷰) 디렉토리 접기 또는 위로 이동 (파일 포함)",
+            "→ 방향키      : (트리 뷰) 디렉토리 펼치기 또는 아래로 이동 (파일 포함)",
             "Backspace     : 상위 경로로 이동",
             "Tab           : 포커스 전환 (파일 트리 <-> 로그 영역)",
             "ESC / Q       : 프로그램 종료",
             "",
             "=== 주요 기능 ===",
             "M             : Work <-> Production 모드 전환",
+            "V             : View 스타일 전환 (detail <-> tree)",
             "D             : Download (Production -> Work)",
             "U             : Upload (Work -> Production)",
             "S             : Save (Work 저장소 커밋)",
@@ -2857,6 +3225,13 @@ class CCCopyTUI:
             "L             : Log 전체 보기",
             "R             : 파일 목록 새로고침",
             "F5            : 강제 화면 새로고침 (dialog 잔상 제거)",
+            "",
+            "=== 뷰 모드 ===",
+            "Detail 모드   : 디렉토리별 탐색 (기본값)",
+            "Tree 모드     : 전체 파일/디렉토리를 트리 구조로 표시",
+            "              - 처음에는 1차 depth까지만 표시 (collapsed)",
+            "              - Enter/←→ 키로 디렉토리 펼치기/접기",
+            "              - 들여쓰기: 2칸 단위로 depth 표시",
             "",
             "=== 기능키 ===",
             "F2            : 도움말 (현재 화면)",
@@ -4852,11 +5227,13 @@ class CCCopyTUI:
             if self.selected_index < len(self.directory_entries) - 1:
                 self.selected_index += 1
         elif key == curses.KEY_LEFT:
-            # 튜토리얼 모드가 아닐 때는 상위 디렉토리로
-            pass  # 향후 구현
+            # 트리 뷰 모드에서는 collapse, detail 모드에서는 동작 없음
+            if self.view_style == ViewStyle.TREE:
+                self.handle_tree_collapse()
         elif key == curses.KEY_RIGHT:
-            # 튜토리얼 모드가 아닐 때는 하위 디렉토리로
-            pass  # 향후 구현
+            # 트리 뷰 모드에서는 expand, detail 모드에서는 동작 없음
+            if self.view_style == ViewStyle.TREE:
+                self.handle_tree_expand()
         elif key == curses.KEY_HOME:
             self.selected_index = 0
         elif key == curses.KEY_END:
@@ -4889,6 +5266,8 @@ class CCCopyTUI:
             self.launch_terminal_at_current_dir()
         elif key == ord('a') or key == ord('A'):
             self.open_app_viewer()
+        elif key == ord('v') or key == ord('V'):
+            self.toggle_view_style()
         elif key == ord('l') or key == ord('L'):
             self.toggle_log_viewer()
         elif key == ord('r') or key == ord('R') or key == 410:  # R or resize
@@ -5032,9 +5411,10 @@ class CCCopyTUI:
                     continue
 
                 # Pending updates 적용 (thread에서 완료된 상태 업데이트)
-                # 단, 도움말/히스토리/업로드/로그 뷰어 모드에서는 무시 (깜박임 방지)
+                # 단, 도움말/히스토리/업로드/로그/앱 뷰어 모드에서는 무시 (깜박임 방지)
                 if not (self.help_viewer_mode or self.history_viewer_mode or
-                        self.upload_viewer_mode or self.log_viewer_mode):
+                        self.upload_viewer_mode or self.log_viewer_mode or
+                        self.app_viewer_mode):
                     if self.apply_pending_updates():
                         self.needs_redraw = True
 
