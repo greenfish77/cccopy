@@ -2305,6 +2305,9 @@ class ProjectManager:
                     # Initial commit 완료 - 이후 auto-commit skip (SOURCES 외 파일은 의도적으로 untracked 유지)
                     display_message("Initial commit 완료 - SOURCES 외 파일은 Git에서 제외됨", "INFO")
                 else:
+                    # Git 2.35+ safe.directory 설정 (기존 저장소, dubious ownership 방지)
+                    GitHelper.configure_safe_directory(self.production_dir, production_perm=production_perm)
+
                     # Production에서 직접 수정된 내용이 있는지 확인하고 자동 커밋
                     display_message("Production의 변경 사항을 체크하고 있습니다...", "INFO")
 
@@ -2397,6 +2400,9 @@ class ProjectManager:
                     display_message("Work Git 저장소 초기화 중...", "INFO")
                     GitHelper.init_repo(self.working_dir)
                     GitHelper.setup_user_config(self.working_dir)
+
+                # Git 2.35+ safe.directory 설정 (dubious ownership 방지)
+                GitHelper.configure_safe_directory(self.working_dir)
 
                 # Work .gitignore를 Production에서 복사 (항상 수행)
                 gitignore_changed = self._sync_gitignore_from_production(production_perm)

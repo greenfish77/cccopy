@@ -14,6 +14,108 @@ from ..utils.ui_handler import display_message
 class GitHelper:
     """Git 명령어 헬퍼"""
 
+    # Git 버전 캐시 (한번만 감지)
+    _git_version_cache = None
+
+    @staticmethod
+    def get_git_version():
+        """Git 버전 감지 및 캐싱
+
+        Returns:
+            tuple: (major, minor, patch) 예: (2, 49, 0) 또는 (1, 8, 3)
+        """
+        if GitHelper._git_version_cache is not None:
+            return GitHelper._git_version_cache
+
+        try:
+            git_bin = os.environ.get('CCCOPY_GIT_BIN_PATH', 'git')
+            result = subprocess.run(
+                [git_bin, '--version'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            # "git version 2.49.0" 형식 파싱
+            version_str = result.stdout.strip()
+            # "git version X.Y.Z" 에서 X.Y.Z 추출
+            parts = version_str.split()
+            if len(parts) >= 3:
+                version_nums = parts[2].split('.')
+                major = int(version_nums[0]) if len(version_nums) > 0 else 0
+                minor = int(version_nums[1]) if len(version_nums) > 1 else 0
+                patch = int(version_nums[2]) if len(version_nums) > 2 else 0
+                GitHelper._git_version_cache = (major, minor, patch)
+                return GitHelper._git_version_cache
+        except Exception as e:
+            display_message(f"Git 버전 감지 실패 (1.8로 가정): {e}", "WARNING")
+
+        # 실패시 1.8로 가정
+        GitHelper._git_version_cache = (1, 8, 0)
+        return GitHelper._git_version_cache
+
+    @staticmethod
+    def is_git_version_ge(major, minor=0):
+        """Git 버전이 지정된 버전 이상인지 확인
+
+        Args:
+            major: 메이저 버전
+            minor: 마이너 버전 (기본값: 0)
+
+        Returns:
+            bool: 현재 Git 버전이 지정 버전 이상이면 True
+        """
+        current = GitHelper.get_git_version()
+        if current[0] > major:
+            return True
+        elif current[0] == major:
+            return current[1] >= minor
+        return False
+
+    @staticmethod
+    def configure_safe_directory(directory, production_perm=None):
+        """Git 2.35+ safe.directory 설정 (dubious ownership 오류 방지)
+
+        Git 2.35 이상에서만 실행됩니다.
+        Git 1.8 등 구버전에서는 아무 작업도 하지 않습니다.
+
+        Args:
+            directory: 안전한 디렉토리로 등록할 경로
+            production_perm: Production 권한 관리자 (필요시)
+        """
+        # Git 2.35 미만 버전은 safe.directory 개념 없음
+        if not GitHelper.is_git_version_ge(2, 35):
+            return
+
+        try:
+            # 절대 경로로 변환
+            abs_dir = os.path.abspath(directory)
+
+            # 이미 safe.directory에 등록되어 있는지 확인
+            git_bin = os.environ.get('CCCOPY_GIT_BIN_PATH', 'git')
+            result = subprocess.run(
+                [git_bin, 'config', '--global', '--get-all', 'safe.directory'],
+                capture_output=True,
+                text=True
+            )
+
+            # 이미 등록되어 있으면 스킵
+            if result.returncode == 0:
+                safe_dirs = result.stdout.strip().split('\n')
+                if abs_dir in safe_dirs or '*' in safe_dirs:
+                    display_message(f"이미 safe.directory 등록됨: {abs_dir}", "DEBUG")
+                    return
+
+            # safe.directory에 추가
+            GitHelper.run_git_command(
+                ['config', '--global', '--add', 'safe.directory', abs_dir],
+                production_perm=production_perm
+            )
+            display_message(f"safe.directory 등록: {abs_dir}", "INFO")
+
+        except Exception as e:
+            # safe.directory 설정 실패는 치명적이지 않으므로 경고만
+            display_message(f"safe.directory 설정 실패 (무시): {e}", "DEBUG")
+
     @staticmethod
     def format_git_status_line(line):
         """git status --short 출력을 사람이 읽기 쉬운 형태로 변환
