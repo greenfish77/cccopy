@@ -10,6 +10,7 @@ CCCopy는 Python 기반 Git 래퍼 도구로, 다음 기능을 제공합니다:
 - **스마트 파일 상태 추적**: Git hash 기반 비교로 6가지 파일 상태 관리
 - **원자적 권한 관리**: 필요시에만 밀리초 단위로 권한 상승
 - **정확한 Git Author 추적**: 다중 사용자 환경에서 `--author` 플래그로 정확한 커밋 기록
+- **TreeView 모드**: 계층적 폴더 구조 탐색 및 파일 상태 확인
 
 ## 주요 특징
 
@@ -42,7 +43,10 @@ CCCopy는 Python 기반 Git 래퍼 도구로, 다음 기능을 제공합니다:
 
 ### 현대적인 TUI 인터페이스
 - 실시간 로그 표시 기능의 Curses 기반 대화형 인터페이스
-- 펼치기/접기 기능의 파일 트리 네비게이션
+- **TreeView와 ListView 양쪽 모드 지원**: `+/-` 키로 모드 전환
+- 펼치기/접기 기능의 파일 트리 네비게이션 (TreeView)
+- 평면 파일 목록으로 빠른 탐색 (ListView)
+- 뷰 모드 자동 저장 및 복원 (종료시 저장)
 - 빠른 시각적 식별을 위한 파일 상태별 색상 구분
 - 모든 작업에 대한 키보드 단축키
 
@@ -138,7 +142,7 @@ python3 main.py
 
 | 키 | 동작 | 설명 |
 |-----|--------|-------------|
-| `Q` / `ESC` | 종료 | 프로그램 즉시 종료 |
+| `Q` / `ESC` | 종료 | 프로그램 즉시 종료 (뷰 모드 자동 저장) |
 | `M` | 모드 전환 | Work ⟷ Production 뷰 전환 |
 | `D` | Download | Production → Work 동기화 |
 | `U` | Upload | Work → Production 동기화 |
@@ -147,8 +151,10 @@ python3 main.py
 | `P` | Project | 프로젝트 관리 (생성/전환/삭제/복제) |
 | `T` | Terminal | 현재 디렉토리에서 터미널 열기 |
 | `R` / `F5` | Refresh | Partial Refresh (현재 디렉토리만) |
+| `V` | 뷰 모드 | TreeView ⟷ ListView 전환 |
+| `+` / `-` | 펼치기/접기 | 전체 항목 펼치기/접기 (TreeView) |
 | `↑/↓` | 이동 | 선택 이동 |
-| `Space` | 펼치기/접기 | 폴더 토글 |
+| `Space` | 펼치기/접기 | 폴더 토글 (TreeView 모드) |
 | `Enter` | 상세정보 | 파일 상세정보 표시 |
 | `Tab` | 포커스 | 포커스 전환 (파일 트리 ⟷ 로그 영역) |
 | `F2` | 도움말 | 모든 키 바인딩 표시 |
@@ -232,9 +238,11 @@ cccopy/
 │   │   ├── preference.py      # 전역 환경설정
 │   │   ├── config.py          # 프로젝트 매니저
 │   │   └── file_utils.py      # 파일 작업
-│   └── ui/                    # 사용자 인터페이스
-│       ├── cli.py             # CLI 모드
-│       └── tui.py             # TUI 모드 (Curses)
+│   ├── ui/                    # 사용자 인터페이스
+│   │   ├── cli.py             # CLI 모드
+│   │   └── tui.py             # TUI 모드 (Curses)
+│   └── apps/                  # 애플리케이션 플러그인
+│       └── fortune/           # Fortune 앱 (샘플)
 └── project/                   # 프로젝트 템플릿
     ├── test_project.ini
     └── dev_project.ini
@@ -296,8 +304,9 @@ Python 표준 라이브러리만 사용 (외부 의존성 없음).
 ### 모듈 구조
 
 - `cccopy` 패키지에서 26개 public API 제공
-- 평균 파일 크기: 546줄 (14개 파일)
+- 총 19개 Python 파일로 구성
 - 유지보수를 위한 모듈화 설계
+- 플러그인 시스템 (`apps/` 디렉토리)
 
 ### 테스트 환경
 

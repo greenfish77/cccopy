@@ -61,6 +61,8 @@ Python은 추가 PIP Package 없이 순수 python 환경을 지원합니다.
 
 ### TUI 인터페이스
 - **Curses 기반 대화형 인터페이스**: 직관적인 키보드 조작
+- **이중 뷰 모드**: TreeView(계층 구조) ⟷ ListView(평면 목록) 전환 (`+/-` 키)
+- **뷰 모드 영속성**: 종료시 선택한 뷰 모드 자동 저장 및 복원
 - **실시간 파일 상태 표시**: 색상으로 파일 상태 구분
 - **한글 완전 지원**: 한글 폭 정확 처리로 깨지지 않는 UI
 - **파일 변경 자동 감지**: Work 디렉토리 파일 수정시 자동 새로고침
@@ -87,10 +89,15 @@ Python은 추가 PIP Package 없이 순수 python 환경을 지원합니다.
 │   │   ├── preference.py     # 전역 환경설정
 │   │   ├── config.py         # 프로젝트 관리
 │   │   └── file_utils.py     # 파일 처리 유틸리티
-│   └── ui/                # 사용자 인터페이스
+│   ├── ui/                # 사용자 인터페이스
+│   │   ├── __init__.py
+│   │   ├── cli.py            # CLI 모드
+│   │   └── tui.py            # TUI 모드 (Curses)
+│   └── apps/              # 애플리케이션 플러그인
 │       ├── __init__.py
-│       ├── cli.py            # CLI 모드
-│       └── tui.py            # TUI 모드 (Curses)
+│       └── fortune/          # Fortune 앱 (샘플)
+│           ├── __init__.py
+│           └── main.py
 ├── project/               # 프로젝트 템플릿
 │   ├── test_project.ini
 │   └── dev_project.ini
@@ -119,7 +126,8 @@ python3 main.py
 
 ## TUI 명령어
 
-- `Q` / `ESC`: 종료
+### 메인 화면
+- `Q` / `ESC`: 종료 (뷰 모드 자동 저장)
 - `M`: Work ⟷ Production 모드 전환
 - `D`: Download (Production → Work)
 - `U`: Upload (Work → Production)
@@ -129,8 +137,9 @@ python3 main.py
 - `P`: Project 관리 (생성/전환/삭제/복제)
 - `T`: Terminal 열기 (현재 디렉토리)
 - `R` / `F5`: 새로고침
+- `+` / `-`: TreeView ⟷ ListView 전환
 - `↑/↓`: 파일/항목 선택
-- `Space`: 폴더 펼치기/접기
+- `Space`: 폴더 펼치기/접기 (TreeView 모드)
 - `Enter`: 파일 상세 정보 / 선택 실행
 - `Tab`: 포커스 전환
 - `F2`: 도움말
@@ -241,6 +250,10 @@ WORKING_BASE_DIR=${HOME}/work/${PROJECT_NAME}
 [VSCODE]
 # VS Code 실행 파일 경로 (선택 사항)
 # PATH=/usr/bin/code
+
+[VIEW]
+# 마지막 사용한 뷰 모드 (자동 저장/복원)
+# MODE=tree  # 또는 list
 ```
 
 ## 보안 및 권한 관리
@@ -318,6 +331,7 @@ setenv VSCODE_PATH /opt/vscode/bin/code    # csh/tcsh
 
 ## 버전 이력
 
+- **v1.1** (2025-11-07): TreeView/ListView 이중 모드 및 뷰 모드 영속성 지원
 - **v1.0** (2025-10-25): 초기 버전
 
 ## 라이센스
