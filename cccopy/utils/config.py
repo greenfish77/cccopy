@@ -1077,8 +1077,14 @@ class ProjectManager:
 
             # 섹션별 오버라이드 정책
             REPLACE_SECTIONS = ['SOURCES', 'EXCLUDES']  # 전체 교체할 섹션
+            IGNORE_SECTIONS = ['PREFERENCE']  # TUI 전용 섹션, ProjectManager에서 무시
 
             for section_name in personal_config.sections():
+                # PREFERENCE 섹션은 TUI 전용이므로 ProjectManager config에 로드하지 않음
+                if section_name in IGNORE_SECTIONS:
+                    display_message(f"[{section_name}] 섹션은 TUI 전용이므로 건너뜀", "DEBUG")
+                    continue
+
                 # SOURCES, EXCLUDES는 전체 교체 (키 병합 방지)
                 if section_name in REPLACE_SECTIONS:
                     # 기존 섹션 삭제 후 재생성
@@ -1255,6 +1261,10 @@ class ProjectManager:
     def get_current_project_name(self):
         """현재 선택된 프로젝트 이름 반환"""
         return self.selected_project
+
+    def get_current_project_number(self):
+        """현재 선택된 프로젝트 번호 반환 (예: "0001")"""
+        return getattr(self, 'current_project_number', None)
 
     def get_project_info(self, project_name):
         """프로젝트 정보 반환"""
@@ -2855,5 +2865,84 @@ class ProjectManager:
 
         # Work 히스토리 표시 (권한 상승 없음)
         show_git_history(self.working_dir, "WORK HISTORY")
+
+
+def save_view_mode(project_id: str, view_mode: str):
+    """프로젝트의 view_mode를 config.ini에 저장
+
+    Args:
+        project_id: 프로젝트 ID (예: "0001")
+        view_mode: 뷰 모드 ("detail" 또는 "tree")
+    """
+    try:
+        # 프로젝트 config 경로
+        project_config_dir = os.path.expanduser(f"~/.cccopy/project/{project_id}")
+        config_file = os.path.join(project_config_dir, "config.ini")
+
+        if not os.path.exists(config_file):
+            display_message(f"프로젝트 설정 파일을 찾을 수 없음: {config_file}", "DEBUG")
+            return False
+
+        # ConfigParser로 읽기
+        config = configparser.ConfigParser()
+        config.read(config_file, encoding='utf-8')
+
+        # [PREFERENCE] 섹션 추가 또는 업데이트
+        if 'PREFERENCE' not in config:
+            config.add_section('PREFERENCE')
+
+        config.set('PREFERENCE', 'view_mode', view_mode)
+
+        # 파일 저장
+        with open(config_file, 'w', encoding='utf-8') as f:
+            config.write(f)
+
+        display_message(f"View mode 저장 완료: {view_mode} (project: {project_id})", "DEBUG")
+        return True
+
+    except Exception as e:
+        display_message(f"View mode 저장 중 오류: {e}", "DEBUG")
+        return False
+
+
+def load_view_mode(project_id: str) -> str:
+    """프로젝트의 view_mode를 config.ini에서 로드
+
+    Args:
+        project_id: 프로젝트 ID (예: "0001")
+
+    Returns:
+        str: 저장된 view_mode ("detail" 또는 "tree"), 없으면 "detail"
+    """
+    try:
+        # 프로젝트 config 경로
+        project_config_dir = os.path.expanduser(f"~/.cccopy/project/{project_id}")
+        config_file = os.path.join(project_config_dir, "config.ini")
+
+        if not os.path.exists(config_file):
+            display_message(f"프로젝트 설정 파일을 찾을 수 없음: {config_file}", "DEBUG")
+            return "detail"  # 기본값
+
+        # ConfigParser로 읽기
+        config = configparser.ConfigParser()
+        config.read(config_file, encoding='utf-8')
+
+        # [PREFERENCE] 섹션의 view_mode 읽기
+        if config.has_option('PREFERENCE', 'view_mode'):
+            view_mode = config.get('PREFERENCE', 'view_mode')
+            # 유효한 값인지 확인
+            if view_mode in ('detail', 'tree'):
+                display_message(f"View mode 로드 완료: {view_mode} (project: {project_id})", "DEBUG")
+                return view_mode
+            else:
+                display_message(f"잘못된 view_mode 값: {view_mode}, 기본값 사용", "DEBUG")
+                return "detail"
+        else:
+            display_message(f"View mode 설정이 없음, 기본값 사용 (project: {project_id})", "DEBUG")
+            return "detail"
+
+    except Exception as e:
+        display_message(f"View mode 로드 중 오류: {e}", "DEBUG")
+        return "detail"  # 오류시 기본값
 
 

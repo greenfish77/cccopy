@@ -283,6 +283,12 @@ class CCCopyTUI:
 
         # 뷰 스타일 (detail 또는 tree)
         self.view_style = ViewStyle.DETAIL  # 기본값: detail
+        # 저장된 view mode 로드 (프로젝트가 설정된 경우)
+        try:
+            self._load_view_mode()
+        except Exception as e:
+            # 프로젝트 설정 전 단계일 수 있으므로 에러 무시
+            pass
 
         # 디렉토리 탐색 상태
         self.current_directory = ""  # 상대 경로 (공백은 루트)
@@ -446,6 +452,66 @@ class CCCopyTUI:
                 pass
             self.current_log_file = None
 
+    # ==================== View Mode 저장/로드 메서드 ====================
+
+    def _save_view_mode(self):
+        """현재 view mode를 프로젝트 설정에 저장"""
+        try:
+            # 프로젝트 번호(예: "0001")를 가져옴
+            project_id = self.workspace.get_current_project_number()
+            self.add_log(f"_save_view_mode: project_id={project_id}", "DEBUG")
+            if not project_id:
+                self.add_log("프로젝트 ID를 가져올 수 없어 view mode 저장 생략", "DEBUG")
+                return
+
+            # ViewStyle enum을 문자열로 변환
+            self.add_log(f"_save_view_mode: 현재 view_style={self.view_style}", "DEBUG")
+            view_mode = self.view_style.value  # "detail" 또는 "tree"
+            self.add_log(f"_save_view_mode: 저장할 view_mode={view_mode}", "DEBUG")
+
+            from ..utils.config import save_view_mode
+            if save_view_mode(project_id, view_mode):
+                self.add_log(f"View mode 저장 완료: {view_mode}", "DEBUG")
+            else:
+                self.add_log(f"View mode 저장 실패 (반환값 False)", "DEBUG")
+        except Exception as e:
+            self.add_log(f"View mode 저장 실패: {e}", "DEBUG")
+            import traceback
+            self.add_log(f"Traceback: {traceback.format_exc()}", "DEBUG")
+
+    def _load_view_mode(self):
+        """프로젝트 설정에서 view mode 로드"""
+        try:
+            # 프로젝트 번호(예: "0001")를 가져옴
+            project_id = self.workspace.get_current_project_number()
+            self.add_log(f"_load_view_mode: project_id={project_id}", "DEBUG")
+            if not project_id:
+                self.add_log("프로젝트 ID를 가져올 수 없어 기본 view mode 사용", "DEBUG")
+                return
+
+            from ..utils.config import load_view_mode
+            view_mode = load_view_mode(project_id)  # "detail" 또는 "tree"
+            self.add_log(f"_load_view_mode: 로드된 view_mode={view_mode}", "DEBUG")
+
+            # 문자열을 ViewStyle enum으로 변환
+            if view_mode == "detail":
+                self.view_style = ViewStyle.DETAIL
+                self.add_log(f"_load_view_mode: view_style을 DETAIL로 설정", "DEBUG")
+            elif view_mode == "tree":
+                self.view_style = ViewStyle.TREE
+                self.add_log(f"_load_view_mode: view_style을 TREE로 설정", "DEBUG")
+            else:
+                # 기본값
+                self.view_style = ViewStyle.DETAIL
+                self.add_log(f"_load_view_mode: 알 수 없는 값({view_mode}), DETAIL로 기본 설정", "DEBUG")
+
+            self.add_log(f"View mode 로드 완료: {view_mode} -> {self.view_style}", "DEBUG")
+        except Exception as e:
+            self.add_log(f"View mode 로드 실패: {e}", "DEBUG")
+            import traceback
+            self.add_log(f"Traceback: {traceback.format_exc()}", "DEBUG")
+            self.view_style = ViewStyle.DETAIL  # 오류시 기본값
+
     # ==================== Cache 관련 메서드 ====================
 
     def get_cached_state(self, rel_path, current_mtime=None):
@@ -583,6 +649,9 @@ class CCCopyTUI:
     def cleanup(self):
         """종료 시 모든 리소스 정리 (graceful shutdown)"""
         self.add_log("Cleaning up resources...", "INFO")
+
+        # 0. View mode 저장
+        self._save_view_mode()
 
         # 1. 로그 파일 닫기
         self._close_log_file()
@@ -6109,6 +6178,9 @@ class CCCopyTUI:
                         continue
 
                     try:
+                        # 현재 프로젝트의 view mode 저장
+                        self._save_view_mode()
+
                         self.workspace._load_project(project_name)
                         # 4자리 패딩된 프로젝트 번호 생성
                         padded_project_number = f"{project_count:04d}"
@@ -6122,6 +6194,9 @@ class CCCopyTUI:
                         self.file_state_cache.clear()
                         self.workspace.last_production_check_time = 0  # Production 체크 시간도 초기화
                         self.add_log("프로젝트 변경으로 캐시 초기화됨", "DEBUG")
+
+                        # 새 프로젝트의 view mode 로드
+                        self._load_view_mode()
 
                         self.show_info_dialog(f"프로젝트가 변경되었습니다:\n{display_name}\n\n작업 경로: {self.workspace.working_dir}")  # 실제 working_dir 표시
                         return True
