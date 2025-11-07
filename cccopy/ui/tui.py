@@ -233,6 +233,30 @@ class FileTree:
             current = current.parent
         return depth
 
+    def expand_all(self):
+        """모든 폴더 펼치기"""
+        self._expand_recursive(self.root)
+        self._build_flat_list()
+
+    def _expand_recursive(self, node: FileNode):
+        """재귀적으로 모든 하위 폴더 펼치기"""
+        if node.is_dir:
+            node.expanded = True
+            for child in node.children:
+                self._expand_recursive(child)
+
+    def collapse_all(self):
+        """모든 폴더 접기"""
+        self._collapse_recursive(self.root)
+        self._build_flat_list()
+
+    def _collapse_recursive(self, node: FileNode):
+        """재귀적으로 모든 하위 폴더 접기"""
+        if node.is_dir:
+            node.expanded = False
+            for child in node.children:
+                self._collapse_recursive(child)
+
 
 class CCCopyTUI:
     """CCCopy TUI 메인 클래스"""
@@ -3060,12 +3084,10 @@ class CCCopyTUI:
                     # 이미 Collapsed 상태 -> 한 칸 위로 이동
                     if self.selected_index > 0:
                         self.selected_index -= 1
-                        self.add_log(f"위로 이동", "DEBUG")
             elif entry['type'] == 'tree_file':
                 # 파일 항목 -> 한 칸 위로 이동
                 if self.selected_index > 0:
                     self.selected_index -= 1
-                    self.add_log(f"위로 이동", "DEBUG")
 
     def handle_tree_expand(self):
         """트리 뷰에서 선택된 항목에 대한 RIGHT 키 처리
@@ -3089,12 +3111,10 @@ class CCCopyTUI:
                     # 이미 Expanded 상태 -> 한 칸 아래로 이동
                     if self.selected_index < len(self.directory_entries) - 1:
                         self.selected_index += 1
-                        self.add_log(f"아래로 이동", "DEBUG")
             elif entry['type'] == 'tree_file':
                 # 파일 항목 -> 한 칸 아래로 이동
                 if self.selected_index < len(self.directory_entries) - 1:
                     self.selected_index += 1
-                    self.add_log(f"아래로 이동", "DEBUG")
 
     def toggle_log_viewer(self):
         """로그 뷰어 모드 토글"""
@@ -4652,6 +4672,127 @@ class CCCopyTUI:
             # 이미 루트 디렉토리인 경우
             self.add_log("이미 루트 디렉토리입니다", "INFO")
 
+    def handle_expand_all(self):
+        """Handle + key - expand all folders in tree view"""
+        # 트리뷰 모드일 때만 동작
+        if self.view_style != ViewStyle.TREE:
+            return
+
+        # 모든 디렉토리 경로를 수집하여 tree_expanded_dirs에 추가
+        all_dirs = self._collect_all_directories()
+        self.tree_expanded_dirs.update(all_dirs)
+        self.add_log(f"모든 폴더를 펼쳤습니다 ({len(all_dirs)}개)", "INFO")
+
+        # 트리 뷰 재구성 (깜박임 없이)
+        self.build_tree_view()
+        self.needs_redraw = True
+
+    def handle_collapse_all(self):
+        """Handle - key - collapse all folders in tree view"""
+        # 트리뷰 모드일 때만 동작
+        if self.view_style != ViewStyle.TREE:
+            return
+
+        # 모든 디렉토리를 접기
+        dir_count = len(self.tree_expanded_dirs)
+        self.tree_expanded_dirs.clear()
+        self.add_log(f"모든 폴더를 접었습니다 ({dir_count}개)", "INFO")
+
+        # 트리 뷰 재구성 (깜박임 없이)
+        self.build_tree_view()
+        self.needs_redraw = True
+
+    def _collect_all_directories(self):
+        """트리 뷰의 모든 디렉토리 경로 수집"""
+        all_dirs = set()
+
+        # 기본 디렉토리 설정
+        if self.mode == ViewMode.WORK:
+            base_dir = self.workspace.working_dir
+        else:
+            base_dir = self.workspace.production_dir
+
+        # 재귀적으로 모든 디렉토리 수집
+        self._collect_dirs_recursive(base_dir, "", all_dirs)
+
+        return all_dirs
+
+    def _collect_dirs_recursive(self, base_dir: str, rel_path: str, all_dirs: set):
+        """재귀적으로 모든 디렉토리 경로를 수집"""
+        import fnmatch
+
+        current_full_path = os.path.join(base_dir, rel_path) if rel_path else base_dir
+
+        if not os.path.isdir(current_full_path):
+            return
+
+        try:
+            items = os.listdir(current_full_path)
+
+            # Exclude 및 Source 패턴 가져오기
+            exclude_patterns = self.workspace.get_exclude_patterns()
+            source_patterns = self.workspace.get_source_patterns()
+
+            # 디렉토리만 추출
+            directories = []
+            for item in items:
+                if item in ['.git', '.cccopy']:
+                    continue
+
+                item_path = os.path.join(current_full_path, item)
+                if os.path.isdir(item_path):
+                    directories.append(item)
+
+            # EXCLUDES 패턴으로 필터링
+            filtered_dirs = []
+            for dir_name in directories:
+                if rel_path:
+                    dir_rel_path = os.path.join(rel_path, dir_name)
+                else:
+                    dir_rel_path = dir_name
+
+                # EXCLUDES 패턴 체크
+                exclude = False
+                for exclude_pattern in exclude_patterns:
+                    if fnmatch.fnmatch(dir_rel_path, exclude_pattern.rstrip('/')):
+                        exclude = True
+                        break
+                    if fnmatch.fnmatch(dir_name, exclude_pattern.rstrip('/')):
+                        exclude = True
+                        break
+                    if exclude_pattern.startswith('**/'):
+                        pattern_tail = exclude_pattern[3:].rstrip('/')
+                        if fnmatch.fnmatch(dir_name, pattern_tail):
+                            exclude = True
+                            break
+
+                if not exclude:
+                    filtered_dirs.append(dir_name)
+
+            directories = filtered_dirs
+
+            # SOURCES 패턴으로 필터링 (루트 디렉토리일 때만)
+            if not rel_path:
+                valid_dirs = set()
+                for pattern in source_patterns:
+                    parts = pattern.split('/')
+                    if parts and parts[0] and not parts[0].startswith('*'):
+                        valid_dirs.add(parts[0])
+
+                directories = [d for d in directories if d in valid_dirs]
+
+            # 각 디렉토리를 all_dirs에 추가하고 재귀 호출
+            for dir_name in directories:
+                dir_rel_path = os.path.join(rel_path, dir_name) if rel_path else dir_name
+                all_dirs.add(dir_rel_path)
+
+                # 하위 디렉토리도 재귀적으로 수집
+                self._collect_dirs_recursive(base_dir, dir_rel_path, all_dirs)
+
+        except (PermissionError, Exception):
+            # 오류 발생시 조용히 무시
+            pass
+
     def run_download(self):
         """다운로드 실행"""
         self.add_log("DOWNLOAD 시작...", "INFO")
@@ -5301,6 +5442,10 @@ class CCCopyTUI:
         # 인터랙션 키들
         elif key == ord(' '):  # Space
             self.handle_space()
+        elif key == ord('+') or key == ord('='):  # + 키 (= 키도 포함, Shift 없이)
+            self.handle_expand_all()
+        elif key == ord('-') or key == ord('_'):  # - 키 (_ 키도 포함, Shift 없이)
+            self.handle_collapse_all()
         elif key == ord('\n') or key == 10 or key == 13 or key == curses.KEY_ENTER:  # Enter (다양한 값 지원)
             self.handle_enter()
         else:
